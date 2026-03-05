@@ -35,6 +35,8 @@ RemoteSystemsTempFiles/
 **/*.tmp
 **/*_backup*/
 **/*.zip
+*.7z
+*.zip
 
 # -----------------------------
 # Screenshots / captures (optional: keep if you want)
