@@ -1,0 +1,61 @@
+# -----------------------------
+# STM32CubeIDE / Eclipse workspace junk
+# -----------------------------
+.metadata/
+.recommenders/
+RemoteSystemsTempFiles/
+**/.metadata/
+
+# -----------------------------
+# Build artifacts (per project)
+# -----------------------------
+**/Debug/
+**/Release/
+**/debug/
+**/release/
+**/build/
+**/Build/
+**/*.o
+**/*.d
+**/*.a
+**/*.elf
+**/*.hex
+**/*.bin
+**/*.map
+**/*.list
+**/*.srec
+**/*.size
+**/*.su
+
+# -----------------------------
+# Logs / backups / exports
+# -----------------------------
+**/*.log
+**/*.bak
+**/*.tmp
+**/*_backup*/
+**/*.zip
+
+# -----------------------------
+# Screenshots / captures (optional: keep if you want)
+# -----------------------------
+*.png
+*.jpg
+*.jpeg
+
+# -----------------------------
+# ST / SDK bundles (recommended to ignore)
+# -----------------------------
+**/MCSDK_v6.4.1-Full/
+MCSDK_v6.4.1-Full/
+
+# If you have other SDK bundles in future:
+**/MCSDK_*/ 
+
+# -----------------------------
+# OS/editor noise
+# -----------------------------
+.DS_Store
+Thumbs.db
+*~
+*.swp
