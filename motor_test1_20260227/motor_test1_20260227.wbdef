@@ -79,7 +79,7 @@
         <define key="M1_DC_CURRENT_RS_MEAS" value="3" />
         <define key="M1_DEFAULT_CONTROL_MODE" value="STC_SPEED_MODE" />
         <define key="M1_DEFAULT_FLUX_COMPONENT" value="0" />
-        <define key="M1_DEFAULT_TARGET_SPEED_RPM" value="1500" />
+        <define key="M1_DEFAULT_TARGET_SPEED_RPM" value="6000" />
         <define key="M1_DEFAULT_TORQUE_COMPONENT" value="0" />
         <define key="M1_DISCONTINUOUS_PWM" value="FALSE" />
         <define key="M1_DP_TOPOLOGY" value="NONE" />
@@ -168,8 +168,8 @@
         <define key="M1_PID_FLUX_KI_DEFAULT" value="3945" />
         <define key="M1_PID_FLUX_KP_DEFAULT" value="2466" />
         <define key="M1_PID_SPEED_KD_DEFAULT" value="0" />
-        <define key="M1_PID_SPEED_KI_DEFAULT" value="108" />
-        <define key="M1_PID_SPEED_KP_DEFAULT" value="2695" />
+        <define key="M1_PID_SPEED_KI_DEFAULT" value="5" />
+        <define key="M1_PID_SPEED_KP_DEFAULT" value="300" />
         <define key="M1_PID_TORQUE_KD_DEFAULT" value="100" />
         <define key="M1_PID_TORQUE_KI_DEFAULT" value="3945" />
         <define key="M1_PID_TORQUE_KP_DEFAULT" value="2466" />
@@ -192,8 +192,8 @@
         <define key="M1_SEGDIV" value="0" />
         <define key="M1_SHARED_SIGNAL_ENABLE" value="FALSE" />
         <define key="M1_SP_KDDIV" value="16" />
-        <define key="M1_SP_KIDIV" value="16384" />
-        <define key="M1_SP_KPDIV" value="2048" />
+        <define key="M1_SP_KIDIV" value="512" />
+        <define key="M1_SP_KPDIV" value="512" />
         <define key="M1_SPD_DIFFERENTIAL_TERM_ENABLING" value="DISABLE" />
         <define key="M1_SPEED_BAND_LOWER_LIMIT" value="11" />
         <define key="M1_SPEED_BAND_UPPER_LIMIT" value="21" />

@@ -1081,19 +1081,19 @@
         },
         "speedReg": {
           "executionRate": "Number.NaN",
-          "targetSpeed": 1500,
+          "targetSpeed": 6000,
           "commutationTime": "Number.NaN",
           "KpKi": {
             "P": {
-              "num": "Number.NaN",
-              "den": "Number.NaN"
+              "num": 300,
+              "den": 512
             },
             "I": {
-              "num": "Number.NaN",
-              "den": "Number.NaN"
+              "num": 5,
+              "den": 512
             }
           },
-          "autoPI": true
+          "autoPI": false
         },
         "torqueReg": {
           "target": "Number.NaN",
