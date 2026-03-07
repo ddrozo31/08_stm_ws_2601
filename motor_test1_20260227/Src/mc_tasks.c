@@ -103,7 +103,9 @@ __weak void MCboot( MCI_Handle_t* pMCIList[NBR_OF_MOTORS] )
     pMCIList[M1] = &Mci[M1];
     FOC_Init();
 
-    ASPEP_start(&aspepOverUartA);
+	#if USE_MOTOR_PILOT
+	  ASPEP_start(&aspepOverUartA);
+	#endif
     /* USER CODE BEGIN MCboot 1 */
 
     /* USER CODE END MCboot 1 */
@@ -185,8 +187,10 @@ __weak void MC_RunMotorControlTasks(void)
       /* Applicative hook at end of Medium Frequency for Motor 1 */
       MC_APP_PostMediumFrequencyHook_M1();
 
-      MCP_Over_UartA.rxBuffer = MCP_Over_UartA.pTransportLayer->fRXPacketProcess(MCP_Over_UartA.pTransportLayer,
-                                                                                &MCP_Over_UartA.rxLength);
+		#if USE_MOTOR_PILOT
+			  MCP_Over_UartA.rxBuffer = MCP_Over_UartA.pTransportLayer->fRXPacketProcess(MCP_Over_UartA.pTransportLayer,
+																						&MCP_Over_UartA.rxLength);
+		#endif
       if ( 0U == MCP_Over_UartA.rxBuffer)
       {
         /* Nothing to do */
