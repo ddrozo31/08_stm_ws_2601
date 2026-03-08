@@ -1,0 +1,44 @@
+The bare minimum would be:
+Make the B-G431B-ESC1 behave as a safe UART-controlled motor node, not yet a “full RC-car ESC.”
+In practical terms, that means only these essentials:
+1. A stable motor-control baseline
+The motor must:
+	• start reliably
+	• spin in both directions, even if reverse is still conservative
+	• report a usable estimated speed
+	• not fault constantly
+Without this, nothing above it matters.
+2. One simple UART command from the RPi5
+Only one input is necessary at first:
+	• u in [-1, 1]
+and you map it very simply:
+	• near 0 -> stop
+	• positive -> forward torque
+	• negative -> reverse torque
+At the absolute minimum, you could even delay “smart braking” and use a very cautious sign change policy.
+3. One telemetry output
+Only send back:
+	• estimated motor speed
+That alone already lets the Pi know whether the board is alive and what the motor is doing.
+4. Basic safety
+Minimum safety should still include:
+	• neutral / zero command on startup
+	• command timeout over UART
+	• fault -> stop motor
+This is the minimum I would never remove.
+
+So the true bare minimum is:
+closed-loop FOC running + UART input [-1,1] + speed telemetry + timeout/fault stop
+Not yet required for the bare minimum:
+	• polished state machine
+	• refined brake-before-reverse behavior
+	• advanced telemetry
+	• low-speed perfection
+	• drivetrain tuning on the real car
+	• Motor Pilot coexistence with runtime UART
+	• autonomous vehicle integration logic
+If I say it in one sentence:
+The bare minimum is to turn the board into a UART-controlled smart actuator that accepts a normalized command and returns estimated speed safely.
+For your project, I would define the first success milestone as:
+“From the RPi5, I can send a value in [-1,1], the motor responds reproducibly, and the board streams back estimated speed without unsafe behavior.”
+That would be enough to call the first version real and usable.

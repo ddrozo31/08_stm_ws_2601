@@ -1,0 +1,48 @@
+Phase 1 — Stable ST baseline
+	• keep Motor Pilot working
+	• verify startup, handover, closed-loop behavior
+	• confirm estimated speed is usable
+Phase 2 — Sensorless robustness
+	• improve rev-up
+	• improve observer lock
+	• reduce startup failures
+	• test light disturbances and light load
+Phase 3 — Firmware architecture split
+	• separate:
+		○ motor-control core
+		○ application layer
+		○ communication layer
+	• create two builds:
+		○ tuning build
+		○ RPi deployment build
+Phase 4 — ESC state machine
+Implement explicitly:
+	• BOOT
+	• WAIT_NEUTRAL
+	• READY
+	• FORWARD
+	• BRAKE
+	• REVERSE
+	• FAULT
+With rules such as:
+	• neutral required at startup
+	• sign reversal first becomes brake
+	• reverse enabled only near zero speed
+	• timeout forces safe state
+	• faults force safe stop
+Phase 5 — UART protocol with the RPi5
+	• normalized command u in [-1,1]
+	• enable bit / watchdog
+	• telemetry: estimated speed, state, voltage, current, faults
+Phase 6 — Bench and drivetrain testing
+	• free motor
+	• disturbance by hand
+	• drivetrain off-ground
+	• low-speed rolling
+	• forward/brake/reverse transitions
+Phase 7 — Acceptance criteria and iteration
+	• startup success rate
+	• speed estimate quality
+	• safe reversals
+	• timeout behavior
+	• real-car usability
