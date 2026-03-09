@@ -230,22 +230,27 @@ Pin/clock config: motor_test1_20260227/motor_test1_20260227.ioc
 --------------------------------------------------------------------------------
 Priority items to work on next:
 
-  [ ] Investigate the UART-side issues noted in commit 35a104e
-        ("works well in Motor Pilot, has some problems in the UART side")
-        Symptoms not yet documented — reproduce with esc_test.py and observe.
-        Likely suspects: baud rate mismatch, RX noise/framing errors, TX
-        blocking during ISR, or WAIT_NEUTRAL handshake not completing cleanly.
+  [x] UART-side issues RESOLVED (two bugs found and fixed):
+        Bug 1 — State machine: ESC_READY and ESC_BRAKE restarted the motor
+          using stale esc_cmd_value after timeout, causing infinite stop/restart
+          loop at the last commanded speed. Fix: require new_cmd != 0 in both
+          states before transitioning to FORWARD/REVERSE.
+        Bug 2 — UART RX reliability: TIM1_UP FOC ISR (priority 0) blocked
+          USART2_IRQ (priority 3) long enough for ORE to drop bytes mid-frame,
+          causing systematic checksum failures. Fix: enable 8-byte UART FIFO in
+          ESC_COMM_Init + drain full FIFO in ESC_COMM_UART_RxISR loop.
 
-  [ ] Test with actual RPi5 at 1843200 baud using tests/esc_test.py
-        - Confirm WAIT_NEUTRAL → READY transition
-        - Confirm FORWARD and REVERSE at various speeds
-        - Confirm BRAKE/direction-reversal sequence
-        - Confirm fault telemetry and recovery
+  [x] Full UART test PASSED (esc_test.py, PC side, wheels off ground):
+        - WAIT_NEUTRAL → READY on u=0.0 ✓
+        - FORWARD (+values) and REVERSE (−values) ✓
+        - Speed changes (increase/decrease) responded correctly ✓
+        - BRAKE/direction-reversal: accidental sign flip handled correctly ✓
+        - Disturbance rejection: external axle load rejected ✓
 
   [ ] Disturbance test: hand-stop wheel while running (wheels off ground)
         - Verify Speed Feedback fault triggers and auto-recovers correctly
 
-  [ ] On-ground test (requires UART working first)
+  [ ] On-ground test — UART now working, ready to proceed
         - Observer floor at 3000 RPM verified no-load; confirm under axle load
         - If sensorless fails under load: consider Hall sensors or encoder
 

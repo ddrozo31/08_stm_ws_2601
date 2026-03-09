@@ -194,9 +194,13 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
     /* ---------------------------------------------------------------------- */
     case ESC_READY:
       /* Motor is stopped. Accept drive commands in either direction directly.
+       * Require new_cmd to avoid restarting on a stale esc_cmd_value left over
+       * from a previous FORWARD/REVERSE cycle (e.g. after timeout fires and
+       * motor stops, the old non-neutral value must not cause an immediate
+       * restart).
        * Only transition if MC_StartMotor1() succeeds — it returns false when
        * the MCSDK is not in IDLE (e.g. FAULT_OVER not yet acknowledged). */
-      if (u > ESC_NEUTRAL_DEADBAND)
+      if ((new_cmd != 0U) && (u > ESC_NEUTRAL_DEADBAND))
       {
         if (MC_StartMotor1())
         {
@@ -204,7 +208,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           esc_state = ESC_FORWARD;
         }
       }
-      else if (u < -ESC_NEUTRAL_DEADBAND)
+      else if ((new_cmd != 0U) && (u < -ESC_NEUTRAL_DEADBAND))
       {
         if (MC_StartMotor1())
         {
@@ -212,7 +216,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           esc_state = ESC_REVERSE;
         }
       }
-      /* Neutral: stay READY. Timeout in READY: motor already stopped, ignore. */
+      /* Neutral or no fresh command: stay READY. */
       break;
 
     /* ---------------------------------------------------------------------- */
@@ -245,10 +249,11 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
     /* ---------------------------------------------------------------------- */
     case ESC_BRAKE:
       /* Wait for the MCSDK to reach IDLE (motor coasted/stopped).
-       * Then dispatch based on the latest command. */
+       * Require new_cmd before dispatching to FORWARD/REVERSE to avoid acting
+       * on a stale command if communication was lost during braking. */
       if (mci_st == IDLE)
       {
-        if (u < -ESC_NEUTRAL_DEADBAND)
+        if ((new_cmd != 0U) && (u < -ESC_NEUTRAL_DEADBAND))
         {
           /* Reverse pending: motor is stopped, safe to start in reverse. */
           if (MC_StartMotor1())
@@ -257,7 +262,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
             esc_state = ESC_REVERSE;
           }
         }
-        else if (u > ESC_NEUTRAL_DEADBAND)
+        else if ((new_cmd != 0U) && (u > ESC_NEUTRAL_DEADBAND))
         {
           /* Changed mind during braking: go forward instead. */
           if (MC_StartMotor1())
@@ -268,7 +273,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         }
         else
         {
-          /* Neutral while braking: motor stopped, return to READY. */
+          /* Neutral, no fresh command, or comm lost: motor stopped, go to READY. */
           esc_state = ESC_READY;
         }
       }

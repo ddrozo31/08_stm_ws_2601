@@ -32,7 +32,7 @@ import time
 import sys
 
 # -- Configuration -------------------------------------------------------------
-PORT      = 'COM3'
+PORT      = 'COM4'
 BAUDRATE  = 1843200
 CMD_HZ    = 10          # command send rate (Hz) -- must be faster than 500 ms timeout
 

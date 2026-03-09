@@ -51,8 +51,24 @@ void ESC_COMM_Init(void)
 {
   rx_idx = 0U;
 
-  /* Enable RXNE interrupt directly -- HAL_UART_Receive_IT cannot be used
-   * because the project's USART2_IRQHandler does not call HAL_UART_IRQHandler. */
+  /* Enable the 8-byte RX FIFO before enabling the interrupt.
+   *
+   * Problem: TIM1_UP (FOC ISR) runs at priority 0 — the highest possible.
+   * USART2_IRQn runs at priority 3 and cannot preempt it.  At 1843200 baud
+   * one byte takes 5.4 µs; a typical FOC ISR takes ~10 µs.  During that
+   * window 2 bytes arrive but only 1 fits in the single-entry RDR, so the
+   * second byte triggers ORE and is silently discarded — corrupting the
+   * command frame and causing checksum failures.
+   *
+   * Fix: enable the 8-byte hardware FIFO (FIFOEN).  Now up to 8 bytes
+   * (43 µs worth) can accumulate during any ISR preemption without ORE.
+   * FIFOEN requires the USART to be disabled (UE=0) during the write. */
+  USART2->CR1 &= ~USART_CR1_UE;           /* disable USART to write FIFOEN */
+  USART2->CR1 |=  USART_CR1_FIFOEN;       /* enable 8-byte RX/TX FIFO      */
+  USART2->CR1 |=  USART_CR1_UE;           /* re-enable USART               */
+
+  /* Enable RXNE/RXFNE interrupt -- fires whenever at least one byte is in
+   * the FIFO (threshold-based interrupt RXFTIE is not needed here). */
   USART2->CR1 |= USART_CR1_RXNEIE_RXFNEIE;
 }
 
@@ -167,9 +183,13 @@ static void ESC_COMM_ProcessByte(uint8_t byte)
   */
 void ESC_COMM_UART_RxISR(void)
 {
-  if ((USART2->ISR & USART_ISR_RXNE_RXFNE) != 0U)
+  /* Drain every byte currently in the FIFO.  With FIFOEN enabled the RXFNE
+   * flag stays set until the FIFO is empty, so a single loop handles both
+   * the common case (1 byte) and the burst case (several bytes queued during
+   * a higher-priority ISR such as the TIM1_UP FOC ISR). */
+  while ((USART2->ISR & USART_ISR_RXNE_RXFNE) != 0U)
   {
-    uint8_t byte = (uint8_t)(USART2->RDR & 0xFFU);  /* reading RDR clears RXNE */
+    uint8_t byte = (uint8_t)(USART2->RDR & 0xFFU);  /* reading RDR pops one byte */
     ESC_COMM_ProcessByte(byte);
   }
 }
