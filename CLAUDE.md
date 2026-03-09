@@ -6,21 +6,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 STM32G431-based BLDC motor controller for an RC vehicle, targeting the B-G431B-ESC1 board. Uses ST Motor Control SDK v6.4.1 (FOC, sensorless). The board acts as a UART-controlled motor node receiving normalized commands `u ∈ [-1, 1]` from a Raspberry Pi 5 and streaming back telemetry (estimated speed, state, faults).
 
-## Build
+## Build Configurations
 
-The project uses STM32CubeIDE (Eclipse CDT managed makefile build). There is no standalone CLI build script — the build is managed by the IDE.
+Two STM32CubeIDE build configurations, selected via the `BUILD_ESC` preprocessor define:
 
-To build from command line (requires arm-none-eabi-gcc in PATH):
-```bash
-make -C motor_test1_20260227/STM32CubeIDE/Debug/
-```
+| Configuration | Define | Purpose |
+|---------------|--------|---------|
+| **Release** | `BUILD_ESC` defined | RPi5 ESC firmware — ASPEP disabled, ESC comm layer active, optimized |
+| **Debug** | *(not defined)* | Motor Pilot tuning — ASPEP enabled, ESC layer inactive, debug symbols |
 
-Build artifacts output to `motor_test1_20260227/STM32CubeIDE/Debug/`:
-- `motor_test1_20260227.elf` — flash with ST-Link via STM32CubeIDE or OpenOCD
-- `motor_test1_20260227.hex` / `.bin` — alternate flash formats
+**To add `BUILD_ESC` to Release in STM32CubeIDE:**
+> Project → Properties → C/C++ Build → Settings → MCU GCC Compiler → Preprocessor → Defined symbols → add `BUILD_ESC` → set configuration to "Release" → Apply.
+
+Build artifacts:
+- `STM32CubeIDE/Release/motor_test1_20260227.elf` — flash for RPi5 deployment
+- `STM32CubeIDE/Debug/motor_test1_20260227.elf` — flash for Motor Pilot tuning
 
 **Key compiler flags:** `-Ofast -g3 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mcpu=cortex-m4`
-**Defines:** `ARM_MATH_CM4`, `USE_HAL_DRIVER`, `STM32G431xx`
+**Base defines:** `ARM_MATH_CM4`, `USE_HAL_DRIVER`, `STM32G431xx`
+
+**What each `BUILD_ESC` guard controls:**
+
+| File | `#ifdef BUILD_ESC` (Release) | `#ifndef BUILD_ESC` (Debug) |
+|------|------------------------------|------------------------------|
+| `mc_tasks.c` | `ASPEP_start()` skipped | `ASPEP_start()` called |
+| `mc_app_hooks.c` | Full ESC state machine + UART init | Minimal stubs, Motor Pilot drives motor |
+| `stm32_mc_common_it.c` | `ESC_COMM_UART_RxISR()` + flag clears | ASPEP IRQ handler runs normally |
 
 ## ESC Communication Layer (esc_comm)
 

@@ -47,18 +47,22 @@
 /* Includes ------------------------------------------------------------------*/
 #include "mc_type.h"
 #include "mc_app_hooks.h"
+#include "mc_config.h"         /* PotRegConv_M1 (ADC scheduler slot) */
+
+#ifdef BUILD_ESC
 #include "mc_interface.h"      /* MCI_State_t, IDLE, START, RUN, FAULT_NOW, FAULT_OVER */
 #include "mc_api.h"            /* MC_StartMotor1, MC_StopMotor1, MC_ProgramSpeedRampMotor1_F */
-#include "mc_config.h"         /* PotRegConv_M1 (ADC scheduler slot) */
 #include "mc_config_common.h"  /* BusVoltageSensor_M1 extern */
 #include "bus_voltage_sensor.h"/* VBS_GetAvBusVoltage_V */
 #include "esc_comm.h"          /* ESC_COMM_Init, ESC_COMM_GetCommand, ESC_COMM_SendTelemetry */
 #include <math.h>              /* fabsf */
+#endif
 
 /** @addtogroup MCSDK  @{ */
 /** @addtogroup MCTasks  @{ */
 /** @defgroup MCAppHooks Motor Control Applicative hooks  @{ */
 
+#ifdef BUILD_ESC
 /* ESC state machine type --------------------------------------------------- */
 
 typedef enum
@@ -310,6 +314,38 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
 
 /* USER SECTION END PostMediumFrequencyHookM1 */
 }
+
+#else /* !BUILD_ESC — Debug / Motor Pilot build ----------------------------- */
+
+/**
+  * @brief Hook called at the end of MCboot() — Motor Pilot build.
+  *
+  * Registers the potentiometer ADC slot only; ESC UART layer is not started.
+  * ASPEP owns USART2; Motor Pilot connects over ST-Link VCP.
+  */
+__weak void MC_APP_BootHook(void)
+{
+  (void)RCM_RegisterRegConv(&PotRegConv_M1);
+
+/* USER CODE BEGIN BootHook */
+
+/* USER CODE END BootHook */
+}
+
+/**
+  * @brief Hook called every Medium Frequency task cycle — Motor Pilot build.
+  *
+  * Empty: Motor Pilot drives the motor directly via MCP/ASPEP.
+  * No ESC state machine, no UART command processing.
+  */
+__weak void MC_APP_PostMediumFrequencyHook_M1(void)
+{
+/* USER SECTION BEGIN PostMediumFrequencyHookM1 */
+
+/* USER SECTION END PostMediumFrequencyHookM1 */
+}
+
+#endif /* BUILD_ESC */
 
 /** @} */
 /** @} */
