@@ -63,13 +63,14 @@ Two files own USART2 exclusively — ASPEP/MCP is disabled:
 
 **Key parameters:**
 - `ESC_MAX_SPEED_RPM 15000` — |u|=1.0 maps to this RPM
+- `ESC_MIN_SPEED_RPM 3000` — minimum clamped speed; matched to `OBS_MINIMUM_SPEED_RPM` to prevent the speed loop commanding the observer below its handoff point
 - `ESC_RAMP_MS 100` — speed ramp duration per command
 - `ESC_NEUTRAL_DEADBAND 0.02f` — |u| below this = neutral
 - `ESC_TIMEOUT_MS 500` — stop motor if no command for 500 ms
 - `ESC_TELEMETRY_EVERY 100` — send telemetry every 100 calls (~10 Hz)
 
 **Sensorless operating limits (hardware-verified):**
-- **Minimum reliable speed: ±2500 RPM** — below this the BEMF signal is too weak for the STO observer to hold lock under load (Ke=0.25 V/kRPM → only ~0.625 V at 2500 RPM against 12 V bus)
+- **Minimum reliable speed: ±2500 RPM** — BEMF floor (physics); firmware floor is 3000 RPM to match observer handoff
 - **Full stall faults** — if the axle is stopped by external load the observer will lose lock and raise `Speed Feedback` fault; this is a physics constraint of sensorless FOC, not a firmware bug
 - Observer handoff happens at 3000 RPM during rev-up (`OBS_MINIMUM_SPEED_RPM`)
 

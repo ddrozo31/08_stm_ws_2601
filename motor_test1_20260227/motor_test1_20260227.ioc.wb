@@ -65,8 +65,8 @@
 # CubeMX versions                                                                                                      #
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 File.Version=6
-MxCube.Version=6.16.1
-MxDb.Version=DB.6.0.161
+MxCube.Version=6.17.0
+MxDb.Version=DB.6.0.170
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
@@ -1250,7 +1250,7 @@ MotorControl.CLOCK_FREQUENCY=CPU_CLK_170_MHZ
 MotorControl.CLOCK_SOURCE=EXTERNAL
 MotorControl.CPU_CLK_170_MHZ=true
 MotorControl.CTLBOARD_NAME=B-G431B-ESC1
-MotorControl.CUBE_MX_VER=6.16.1
+MotorControl.CUBE_MX_VER=6.17.0
 MotorControl.CURR_SAMPLING_TIME=6
 MotorControl.CURRENT_READING_TOPOLOGY=THREE_SHUNT_INDEPENDENT_RESOURCES
 MotorControl.DBG_MCU_LOAD_MEASURE=false

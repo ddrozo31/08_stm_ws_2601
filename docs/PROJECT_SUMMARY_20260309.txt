@@ -23,22 +23,33 @@ SDK: ST Motor Control SDK v6.4.1 (sensorless, speed mode, STO observer + PLL)
 IDE: STM32CubeIDE (Eclipse-based), project at motor_test1_20260227/STM32CubeIDE/
 
 --------------------------------------------------------------------------------
-2. CURRENT STATUS (as of 2026-03-09)
+2. CURRENT STATUS (as of 2026-03-09, session 2)
 --------------------------------------------------------------------------------
 Phase 1 (Bare minimum)  DONE — FOC + UART input + speed telemetry + fault/timeout
 Phase 2 (Full ESC)      DONE — 7-state ESC state machine + extended 10-byte
                                 telemetry (speed + state + faults + cmd + vbus)
                                 Hardware verified on bench.
 
-Latest verified commit:
-  90f0ca5  "Verify dual-build: Release (BUILD_ESC) confirmed working with esc_test.py"
+Phase 3 (Vehicle-ready) IN PROGRESS — see Section 9 for roadmap.
 
-Known issues still in working tree (not committed):
-  - mc_app_hooks.c, mc_tasks.c, .project, language.settings.xml have local mods
-  - The last commit note says "works well in Motor Pilot, has some problems in
-    the UART side" — investigate before continuing (see git log above).
+Progress this session:
+  [x] ESC_MIN_SPEED_RPM raised 2500 → 3000 RPM
+        Rationale: OBS_MINIMUM_SPEED_RPM=3000; commanding below handoff point
+        destabilises the freshly locked observer. Firmware floor now matches
+        the observer handoff threshold exactly.
+  [x] MCW regeneration performed (office PC) to restore missing MCSDK sources
+        (bus_voltage_sensor.c and the full Drivers/ tree were absent on this PC).
+        Recovery procedure: restore mc_app_hooks.c, mc_tasks.c, drive_parameters.h,
+        pmsm_motor_parameters.h, stm32g4xx_hal_msp.c from git after MCW runs.
+  [x] Drivetrain no-load test at ±3000 RPM — PASSED (Motor Pilot, Debug build)
+        Wheels off the ground, drivetrain spinning. Observer holds at 3000 RPM.
+        Disturbance test (hand-stop wheel) NOT yet performed.
+  [ ] UART-side issues still open — must be diagnosed before on-ground test.
 
-Phase 3 (Vehicle-ready) NOT STARTED — see Section 9 for roadmap.
+Working tree (this commit):
+  - mc_app_hooks.c : ESC_MIN_SPEED_RPM 2500 → 3000
+  - .cproject, .ioc, .ioc.wb, .settings, language.settings.xml : MCW regeneration
+  - CLAUDE.md, docs/ : documentation updated
 
 --------------------------------------------------------------------------------
 3. BUILD CONFIGURATIONS
@@ -153,7 +164,7 @@ States and transitions:
 
 Key parameters:
   ESC_MAX_SPEED_RPM    15000  — |u|=1.0 maps to this RPM
-  ESC_MIN_SPEED_RPM    2500   — minimum clamped speed (BEMF physics limit)
+  ESC_MIN_SPEED_RPM    3000   — firmware floor = OBS_MINIMUM_SPEED_RPM (observer handoff)
   ESC_RAMP_MS          100    — speed ramp duration per command (ms)
   ESC_NEUTRAL_DEADBAND 0.02f  — |u| below this treated as neutral
   ESC_TIMEOUT_MS       500    — stop motor if no command for 500 ms
@@ -182,7 +193,10 @@ Max speed      : 15000 RPM
 Bus voltage    : 12 V nominal
 
 Observer limits (hardware-verified):
-  Min reliable speed  : ±2500 RPM (BEMF too weak below this under load)
+  Min reliable speed  : ±2500 RPM (BEMF physics floor, hardware-verified bench)
+  Firmware speed floor: ±3000 RPM (ESC_MIN_SPEED_RPM = OBS_MINIMUM_SPEED_RPM)
+  Drivetrain no-load  : ±3000 RPM verified with wheels off ground (Motor Pilot)
+  Disturbance test    : NOT YET performed (hand-stop under load)
   Observer handoff    : 3000 RPM during rev-up (OBS_MINIMUM_SPEED_RPM)
   Full stall faults   : axle locked by external load → Speed Feedback fault
                         This is a physics constraint of sensorless FOC, not a bug.
@@ -218,7 +232,9 @@ Priority items to work on next:
 
   [ ] Investigate the UART-side issues noted in commit 35a104e
         ("works well in Motor Pilot, has some problems in the UART side")
-        Likely diagnosis: baud rate mismatch, RX noise, or TX blocking during ISR
+        Symptoms not yet documented — reproduce with esc_test.py and observe.
+        Likely suspects: baud rate mismatch, RX noise/framing errors, TX
+        blocking during ISR, or WAIT_NEUTRAL handshake not completing cleanly.
 
   [ ] Test with actual RPi5 at 1843200 baud using tests/esc_test.py
         - Confirm WAIT_NEUTRAL → READY transition
@@ -226,8 +242,11 @@ Priority items to work on next:
         - Confirm BRAKE/direction-reversal sequence
         - Confirm fault telemetry and recovery
 
-  [ ] Load testing under real drivetrain
-        - Verify minimum speed 2500 RPM holds under axle load
+  [ ] Disturbance test: hand-stop wheel while running (wheels off ground)
+        - Verify Speed Feedback fault triggers and auto-recovers correctly
+
+  [ ] On-ground test (requires UART working first)
+        - Observer floor at 3000 RPM verified no-load; confirm under axle load
         - If sensorless fails under load: consider Hall sensors or encoder
 
   [ ] Tune current loop PID with Motor Pilot on real motor under load

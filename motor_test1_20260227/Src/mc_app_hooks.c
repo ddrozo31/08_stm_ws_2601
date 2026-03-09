@@ -81,9 +81,11 @@ typedef enum
 /* |u|=1.0 maps to this RPM (forward and reverse). */
 #define ESC_MAX_SPEED_RPM     15000.0f
 
-/* Minimum commanded speed (RPM).  Below this the BEMF is too weak for the STO
- * observer to hold lock under load (hardware-verified limit: ~2500 RPM). */
-#define ESC_MIN_SPEED_RPM     2500.0f
+/* Minimum commanded speed (RPM).  Matched to OBS_MINIMUM_SPEED_RPM (3000) so
+ * the speed loop never commands the observer below its reliable handoff point.
+ * Hardware-verified BEMF floor is ~2500 RPM but commanding below the handoff
+ * threshold destabilises the freshly locked observer under load. */
+#define ESC_MIN_SPEED_RPM     3000.0f
 
 /* Speed ramp duration applied on each drive command (ms). */
 #define ESC_RAMP_MS           100U
