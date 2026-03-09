@@ -1,0 +1,322 @@
+================================================================================
+  STM32G431 ESC FIRMWARE — PROJECT SUMMARY
+  Date: 2026-03-09  |  Branch: claude_test  |  Repo: C:\01_Fixed\08_stm_ws_2601
+================================================================================
+
+--------------------------------------------------------------------------------
+1. WHAT THIS PROJECT IS
+--------------------------------------------------------------------------------
+A BLDC motor controller firmware for a RC vehicle drivetrain.
+
+Hardware:
+  Board       : ST B-G431B-ESC1 (STM32G431CBU6, Cortex-M4, 170 MHz)
+  Motor       : 3-phase BLDC, sensorless FOC, ~3100KV
+  Bus voltage : 12 V nominal
+  Host        : Raspberry Pi 5 connected via USART2
+
+Purpose:
+  The STM32 acts as a UART-controlled ESC node.
+  RPi5 sends normalized commands u ∈ [-1.0, +1.0].
+  STM32 runs closed-loop FOC and streams back telemetry (~10 Hz).
+
+SDK: ST Motor Control SDK v6.4.1 (sensorless, speed mode, STO observer + PLL)
+IDE: STM32CubeIDE (Eclipse-based), project at motor_test1_20260227/STM32CubeIDE/
+
+--------------------------------------------------------------------------------
+2. CURRENT STATUS (as of 2026-03-09)
+--------------------------------------------------------------------------------
+Phase 1 (Bare minimum)  DONE — FOC + UART input + speed telemetry + fault/timeout
+Phase 2 (Full ESC)      DONE — 7-state ESC state machine + extended 10-byte
+                                telemetry (speed + state + faults + cmd + vbus)
+                                Hardware verified on bench.
+
+Latest verified commit:
+  90f0ca5  "Verify dual-build: Release (BUILD_ESC) confirmed working with esc_test.py"
+
+Known issues still in working tree (not committed):
+  - mc_app_hooks.c, mc_tasks.c, .project, language.settings.xml have local mods
+  - The last commit note says "works well in Motor Pilot, has some problems in
+    the UART side" — investigate before continuing (see git log above).
+
+Phase 3 (Vehicle-ready) NOT STARTED — see Section 9 for roadmap.
+
+--------------------------------------------------------------------------------
+3. BUILD CONFIGURATIONS
+--------------------------------------------------------------------------------
+Two STM32CubeIDE configurations, switched via BUILD_ESC preprocessor define:
+
+  Configuration | BUILD_ESC defined? | Purpose
+  --------------|-------------------|-------------------------------------------
+  Release       | YES               | RPi5 ESC firmware — flash for deployment
+  Debug         | NO                | Motor Pilot tuning — ASPEP enabled
+
+Key compiler flags:
+  -Ofast -g3 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mcpu=cortex-m4
+
+Base defines: ARM_MATH_CM4, USE_HAL_DRIVER, STM32G431xx
+
+To add BUILD_ESC in STM32CubeIDE (Release config only):
+  Project → Properties → C/C++ Build → Settings
+  → MCU GCC Compiler → Preprocessor → Defined symbols → add BUILD_ESC
+  → Set configuration to "Release" → Apply and Close → Rebuild
+
+Flash artifacts:
+  STM32CubeIDE/Release/motor_test1_20260227.elf  ← RPi5 deployment
+  STM32CubeIDE/Debug/motor_test1_20260227.elf    ← Motor Pilot tuning
+
+What BUILD_ESC controls in each file:
+  mc_tasks.c            : #ifdef skips ASPEP_start() in Release
+  mc_app_hooks.c        : #ifdef enables full ESC state machine + UART init
+  stm32_mc_common_it.c  : #ifdef calls ESC_COMM_UART_RxISR() + clears ASPEP flags
+
+--------------------------------------------------------------------------------
+4. REPOSITORY STRUCTURE (key files)
+--------------------------------------------------------------------------------
+motor_test1_20260227/
+  Inc/
+    esc_comm.h           ← ESC UART layer public API (new, ours)
+    drive_parameters.h   ← PWM freq, FOC gains, PID parameters
+    pmsm_motor_parameters.h ← Motor electrical params (Rs, Ls, pole pairs)
+    mc_api.h             ← MCSDK public API declarations
+    mc_type.h            ← Fault codes, state enum
+  Src/
+    esc_comm.c           ← UART RX parser + blocking TX (new, ours)
+    mc_app_hooks.c       ← ESC state machine (new, ours) — MAIN APP LOGIC
+    mc_tasks.c           ← Medium-frequency control tasks (modified: ASPEP guard)
+    stm32_mc_common_it.c ← IRQ handlers (modified: ESC_COMM_UART_RxISR call)
+    main.c               ← System init, peripheral setup, superloop
+    mc_interface.c       ← MCSDK motor state machine (IDLE→START→RUN→FAULT)
+    mc_api.c             ← MC_StartMotor1, MC_StopMotor1, MC_ProgramSpeedRamp
+    aspep.c              ← ASPEP framing (used in Debug/Motor Pilot only)
+  motor_test1_20260227.ioc ← STM32CubeMX config (do NOT overwrite USER CODE sections)
+  STM32CubeIDE/
+    STM32G431CBUX_FLASH.ld ← Linker script
+
+tests/
+  esc_test.py            ← PC/RPi5 test script — interactive ESC command sender
+
+docs/
+  smart_actuator.txt     ← Original design discussion: bare minimum → full ESC roadmap
+  20260308_ESCFullProject.txt  ← Full project design notes (ChatGPT session)
+  20260308_ESCBareMinimumProject.txt ← Bare minimum design notes
+  PROJECT_SUMMARY_20260309.txt ← THIS FILE
+
+--------------------------------------------------------------------------------
+5. COMMUNICATION PROTOCOL (USART2, 1843200 baud, 8N1)
+--------------------------------------------------------------------------------
+Command frame  RPi5 → STM32  (5 bytes):
+  [0xAA] [cmd_lo] [cmd_hi] [0x00] [XOR_chk]
+  cmd = int16_t, scaled: -32768 = -1.0, +32767 = +1.0
+  checksum = XOR of bytes [1]..[3]
+
+Telemetry frame  STM32 → RPi5  (10 bytes):
+  [0xBB] [spd_lo] [spd_hi] [state] [faults] [u_lo] [u_hi] [v_lo] [v_hi] [XOR_chk]
+  speed  = int16_t RPM (average, signed)
+  state  = ESC_State_t byte (0..6)
+  faults = lower byte of MC_GetCurrentFaultsMotor1()
+  u      = int16_t raw command currently active (-32768..+32767)
+  v      = uint16_t DC bus voltage in whole Volts
+  checksum = XOR of bytes [1]..[8]
+
+ESC state byte values:
+  0=BOOT  1=WAIT_NEUTRAL  2=READY  3=FORWARD  4=BRAKE  5=REVERSE  6=FAULT
+
+UART architecture:
+  RX: RXNEIE enabled directly via USART2->CR1 in ESC_COMM_Init().
+      ESC_COMM_UART_RxISR() called from USER CODE BEGIN 0 of USART2_IRQHandler.
+      Self-synchronising SOF search — no alignment loss on garbled bytes.
+      HAL_UART_Receive_IT CANNOT be used (the project's IRQ handler is custom LL).
+  TX: Direct register polling (TXE per byte, no TC wait).
+      10 bytes ≈ 43 µs at 1843200 baud — safe inside 1 ms task cycle.
+
+In Debug build:
+  ASPEP/MCP owns USART2, Motor Pilot connects via ST-Link VCP (same physical port).
+  ESC_COMM layer is compiled out. Motor Pilot sends speed/torque commands directly.
+
+--------------------------------------------------------------------------------
+6. ESC STATE MACHINE (mc_app_hooks.c)
+--------------------------------------------------------------------------------
+States and transitions:
+  BOOT         → WAIT_NEUTRAL    always (one-shot at startup)
+  WAIT_NEUTRAL → READY           when |u| < deadband (host confirmed neutral)
+  READY        → FORWARD         when u >  deadband AND MC_StartMotor1() ok
+  READY        → REVERSE         when u < -deadband AND MC_StartMotor1() ok
+  FORWARD      → READY           when |u| < deadband OR 500 ms timeout
+  FORWARD      → BRAKE           when u < -deadband (sign reversal)
+  REVERSE      → READY           when |u| < deadband OR 500 ms timeout
+  REVERSE      → BRAKE           when u >  deadband (sign reversal)
+  BRAKE        → FORWARD         when MCSDK=IDLE AND u >  deadband
+  BRAKE        → REVERSE         when MCSDK=IDLE AND u < -deadband
+  BRAKE        → READY           when MCSDK=IDLE AND |u| < deadband
+  any          → FAULT           when MCSDK fault detected (faults != 0 or FAULT_NOW/OVER)
+  FAULT        → WAIT_NEUTRAL    when MCSDK reaches FAULT_OVER (auto-acknowledged)
+
+Key parameters:
+  ESC_MAX_SPEED_RPM    15000  — |u|=1.0 maps to this RPM
+  ESC_MIN_SPEED_RPM    2500   — minimum clamped speed (BEMF physics limit)
+  ESC_RAMP_MS          100    — speed ramp duration per command (ms)
+  ESC_NEUTRAL_DEADBAND 0.02f  — |u| below this treated as neutral
+  ESC_TIMEOUT_MS       500    — stop motor if no command for 500 ms
+  ESC_TELEMETRY_EVERY  100    — one telemetry frame every 100 hook calls (~10 Hz)
+
+Safety:
+  esc_cmd_value initialised to 0x7FFF (non-neutral) → WAIT_NEUTRAL blocks until
+  the host explicitly sends a neutral frame. Motor cannot start on power-on.
+
+Hook is called every ~1 ms from MC_APP_PostMediumFrequencyHook_M1() (mc_tasks.c).
+
+--------------------------------------------------------------------------------
+7. MOTOR PARAMETERS
+--------------------------------------------------------------------------------
+Motor type     : 3-phase BLDC, sensorless FOC, ~3100KV
+Pole pairs     : 2
+Rs             : 0.1 Ω (stator resistance)
+Ls (firmware)  : 5 µH  [NOTE: true measured value is ~1 µH, but 1 µH makes the
+                         discrete-time observer unstable at 25 kHz FOC rate.
+                         τ=Ls/Rs=10µs < Ts=40µs → C1/F1>1 → unstable.
+                         Using 5 µH gives C1/F1=0.8 (stable). Tune Kp/Ki in
+                         Motor Pilot to compensate the detuned current loop.]
+Ke             : 0.25 V_rms ph-ph / kRPM (Motor Pilot identification result)
+Nominal current: 2 A peak
+Max speed      : 15000 RPM
+Bus voltage    : 12 V nominal
+
+Observer limits (hardware-verified):
+  Min reliable speed  : ±2500 RPM (BEMF too weak below this under load)
+  Observer handoff    : 3000 RPM during rev-up (OBS_MINIMUM_SPEED_RPM)
+  Full stall faults   : axle locked by external load → Speed Feedback fault
+                        This is a physics constraint of sensorless FOC, not a bug.
+
+PWM frequency  : 25 kHz
+FOC rate       : 25 kHz (REGULATION_EXECUTION_RATE=1)
+Speed loop rate: 1 kHz
+
+Current loop PID (in drive_parameters.h):
+  Kp=1235, Ki=1975 (scaled for Ls=5µH firmware model; base values at Ls=1µH
+  were Kp=247, Ki=395; ×5 for inflated Ls model)
+  Tune live with Motor Pilot after startup is confirmed.
+
+--------------------------------------------------------------------------------
+8. HARDWARE PERIPHERALS (STM32G431CBU6 on B-G431B-ESC1)
+--------------------------------------------------------------------------------
+TIM1       : 6-channel PWM, 3-phase motor drive
+ADC1/ADC2  : Phase current + DC bus voltage sensing
+USART2     : RPi5 link — 1843200 baud (Release) / Motor Pilot (Debug)
+COMP1/2/4  : Analog comparators for overcurrent protection
+OPAMP1/2/3 : Signal conditioning for current sense amplification
+CORDIC     : Hardware sin/cos accelerator for FOC
+DAC3       : Debug/monitoring output
+
+Pin/clock config: motor_test1_20260227/motor_test1_20260227.ioc
+  WARNING: regenerating from CubeMX overwrites HAL init files.
+  Always keep custom code inside USER CODE sections to survive regeneration.
+
+--------------------------------------------------------------------------------
+9. NEXT TASKS (Phase 3 — Vehicle-Ready)
+--------------------------------------------------------------------------------
+Priority items to work on next:
+
+  [ ] Investigate the UART-side issues noted in commit 35a104e
+        ("works well in Motor Pilot, has some problems in the UART side")
+        Likely diagnosis: baud rate mismatch, RX noise, or TX blocking during ISR
+
+  [ ] Test with actual RPi5 at 1843200 baud using tests/esc_test.py
+        - Confirm WAIT_NEUTRAL → READY transition
+        - Confirm FORWARD and REVERSE at various speeds
+        - Confirm BRAKE/direction-reversal sequence
+        - Confirm fault telemetry and recovery
+
+  [ ] Load testing under real drivetrain
+        - Verify minimum speed 2500 RPM holds under axle load
+        - If sensorless fails under load: consider Hall sensors or encoder
+
+  [ ] Tune current loop PID with Motor Pilot on real motor under load
+        - Start with existing values Kp=1235, Ki=1975
+        - Adjust until step response is clean without overshoot
+
+  [ ] Tune speed PID (currently PID_SPEED_KP_DEFAULT=300, KI=5)
+
+  [ ] Consider Hall/encoder if sensorless proves insufficient at low speed
+
+  [ ] RPi5 Python driver cleanup
+        - tests/esc_test.py works as a test tool
+        - For production: wrap into a proper Python class/module
+
+  [ ] Expand telemetry if needed (temperature, torque estimate)
+
+--------------------------------------------------------------------------------
+10. HOW TO SET UP ON A NEW PC
+--------------------------------------------------------------------------------
+Requirements:
+  - STM32CubeIDE 1.16.x or later (free from st.com)
+  - ST Motor Control Workbench 6.4.1 (optional, for parameter changes)
+  - ST-Link V3 USB-JTAG (built into the B-G431B-ESC1 board)
+  - Git (for version control)
+  - Python 3 + pyserial (for tests/esc_test.py)
+
+Steps:
+  1. Clone / copy the repo to C:\01_Fixed\08_stm_ws_2601
+     (or adjust paths — STM32CubeIDE project paths are relative)
+
+  2. Open STM32CubeIDE → File → Open Projects from File System
+     → Navigate to motor_test1_20260227/STM32CubeIDE → Import
+
+  3. Verify two configurations exist: Debug and Release
+
+  4. Confirm BUILD_ESC is defined ONLY in Release configuration:
+     Right-click project → Properties → C/C++ Build → Settings
+     → MCU GCC Compiler → Preprocessor → Defined symbols
+     Release: BUILD_ESC must be present
+     Debug:   BUILD_ESC must NOT be present
+
+  5. Build Release → flash with ST-Link (Run → Run Configurations or drag .elf)
+
+  6. Test with:
+     cd tests/
+     pip install pyserial
+     python esc_test.py
+     (Edit PORT = 'COMx' to match your ST-Link VCP port in Device Manager)
+
+  7. For Motor Pilot tuning: build and flash Debug config, then connect with
+     ST Motor Control Workbench to the same COM port at default baud (115200).
+
+--------------------------------------------------------------------------------
+11. KEY FILES TO READ FIRST (onboarding order)
+--------------------------------------------------------------------------------
+  1. CLAUDE.md                        — full architecture reference
+  2. Inc/esc_comm.h                   — communication protocol definition
+  3. Src/mc_app_hooks.c               — ESC state machine (the core app logic)
+  4. Src/esc_comm.c                   — UART implementation detail
+  5. Src/stm32_mc_common_it.c         — IRQ handler integration point
+  6. Inc/drive_parameters.h           — all tunable motor/FOC parameters
+  7. Inc/pmsm_motor_parameters.h      — motor electrical constants
+  8. tests/esc_test.py                — how to talk to the board from PC/RPi5
+
+--------------------------------------------------------------------------------
+12. GIT BRANCH NOTES
+--------------------------------------------------------------------------------
+Current branch : claude_test
+Main branch    : main
+
+Recent history:
+  35a104e  works well in Motor Pilot, has some problems in the UART side
+  90f0ca5  Verify dual-build: Release (BUILD_ESC) confirmed working with esc_test.py
+  fa4565b  Add Debug/Release dual-build: Motor Pilot vs ESC firmware
+  ef3341a  docs
+  c657755  Phase 2 complete: full ESC state machine + extended telemetry, HW verified
+  54bf80c  docs update
+  6758370  regenerate and rebuild ok
+  4771289  build successfully baseline
+
+Unstaged changes (as of session start):
+  M  motor_test1_20260227/STM32CubeIDE/.project
+  M  motor_test1_20260227/STM32CubeIDE/.settings/language.settings.xml
+  M  motor_test1_20260227/Src/mc_app_hooks.c
+  M  motor_test1_20260227/Src/mc_tasks.c
+
+  These modifications are the current work in progress.
+  Review with `git diff` before committing.
+
+--------------------------------------------------------------------------------
+END OF SUMMARY
+================================================================================
