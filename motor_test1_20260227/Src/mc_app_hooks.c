@@ -81,11 +81,21 @@ typedef enum
 /* |u|=1.0 maps to this RPM (forward and reverse). */
 #define ESC_MAX_SPEED_RPM     15000.0f
 
+/* Minimum commanded speed (RPM).  Below this the BEMF is too weak for the STO
+ * observer to hold lock under load (hardware-verified limit: ~2500 RPM). */
+#define ESC_MIN_SPEED_RPM     2500.0f
+
 /* Speed ramp duration applied on each drive command (ms). */
 #define ESC_RAMP_MS           100U
 
 /* |u| below this threshold is treated as neutral. */
 #define ESC_NEUTRAL_DEADBAND  0.02f
+
+/* Clamp a signed RPM value so its magnitude is never below ESC_MIN_SPEED_RPM.
+ * Preserves sign so forward/reverse commands both get the floor applied. */
+#define ESC_CLAMP_RPM(rpm) \
+  (((rpm) >= 0.0f) ? ((rpm) < ESC_MIN_SPEED_RPM ? ESC_MIN_SPEED_RPM : (rpm)) \
+                   : ((rpm) > -ESC_MIN_SPEED_RPM ? -ESC_MIN_SPEED_RPM : (rpm)))
 
 /* Time without a valid command before stopping the motor (ms).
  * Applies only in FORWARD and REVERSE. */
@@ -149,8 +159,11 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
   uint8_t timed_out = (esc_timeout_ctr >= ESC_TIMEOUT_MS) ? 1U : 0U;
 
   /* ---- Fault detection (priority: overrides all other states) ------------- */
+  /* Also catch FAULT_OVER: current-faults bitmask is 0 in that state but
+   * MC_StartMotor1() still refuses to run until acknowledged. */
 
-  if ((faults != 0U) && (esc_state != ESC_FAULT))
+  if (((faults != 0U) || (mci_st == FAULT_NOW) || (mci_st == FAULT_OVER))
+      && (esc_state != ESC_FAULT))
   {
     (void)MC_StopMotor1();
     esc_state = ESC_FAULT;
@@ -178,18 +191,24 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
 
     /* ---------------------------------------------------------------------- */
     case ESC_READY:
-      /* Motor is stopped. Accept drive commands in either direction directly. */
+      /* Motor is stopped. Accept drive commands in either direction directly.
+       * Only transition if MC_StartMotor1() succeeds — it returns false when
+       * the MCSDK is not in IDLE (e.g. FAULT_OVER not yet acknowledged). */
       if (u > ESC_NEUTRAL_DEADBAND)
       {
-        (void)MC_StartMotor1();
-        (void)MC_ProgramSpeedRampMotor1_F(u * ESC_MAX_SPEED_RPM, ESC_RAMP_MS);
-        esc_state = ESC_FORWARD;
+        if (MC_StartMotor1())
+        {
+          (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+          esc_state = ESC_FORWARD;
+        }
       }
       else if (u < -ESC_NEUTRAL_DEADBAND)
       {
-        (void)MC_StartMotor1();
-        (void)MC_ProgramSpeedRampMotor1_F(u * ESC_MAX_SPEED_RPM, ESC_RAMP_MS);
-        esc_state = ESC_REVERSE;
+        if (MC_StartMotor1())
+        {
+          (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+          esc_state = ESC_REVERSE;
+        }
       }
       /* Neutral: stay READY. Timeout in READY: motor already stopped, ignore. */
       break;
@@ -217,7 +236,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       else
       {
         /* Continuing forward: refresh the speed ramp with the latest command. */
-        (void)MC_ProgramSpeedRampMotor1_F(u * ESC_MAX_SPEED_RPM, ESC_RAMP_MS);
+        (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
       }
       break;
 
@@ -230,16 +249,20 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         if (u < -ESC_NEUTRAL_DEADBAND)
         {
           /* Reverse pending: motor is stopped, safe to start in reverse. */
-          (void)MC_StartMotor1();
-          (void)MC_ProgramSpeedRampMotor1_F(u * ESC_MAX_SPEED_RPM, ESC_RAMP_MS);
-          esc_state = ESC_REVERSE;
+          if (MC_StartMotor1())
+          {
+            (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+            esc_state = ESC_REVERSE;
+          }
         }
         else if (u > ESC_NEUTRAL_DEADBAND)
         {
           /* Changed mind during braking: go forward instead. */
-          (void)MC_StartMotor1();
-          (void)MC_ProgramSpeedRampMotor1_F(u * ESC_MAX_SPEED_RPM, ESC_RAMP_MS);
-          esc_state = ESC_FORWARD;
+          if (MC_StartMotor1())
+          {
+            (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+            esc_state = ESC_FORWARD;
+          }
         }
         else
         {
@@ -273,7 +296,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       else
       {
         /* Continuing reverse: refresh the speed ramp (u is negative → negative RPM). */
-        (void)MC_ProgramSpeedRampMotor1_F(u * ESC_MAX_SPEED_RPM, ESC_RAMP_MS);
+        (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
       }
       break;
 

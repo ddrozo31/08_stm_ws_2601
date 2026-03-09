@@ -36,16 +36,20 @@
 #define M1_SS_MEAS_ERRORS_BEFORE_FAULTS     3 /*!< Number of speed measurement errors before main sensor goes in fault */
 
 /****** State Observer + PLL ****/
-#define VARIANCE_THRESHOLD                  0.45 /*!< Maximum accepted variance on speed estimates (percentage) */
+#define VARIANCE_THRESHOLD                  0.80 /*!< Maximum accepted variance on speed estimates (percentage) */
 
-/* State observer scaling factors F1 */
-#define F1                                  16384
+/* State observer scaling factors F1
+ * Ls=5µH (firmware model) with F1=8192 gives C1=F1*RS/(LS*TF_RATE)=8192*0.1/(5e-6*25000)=6554
+ * and C1/F1=0.8 — the discrete-time observer is stable (requires C1/F1 < 1).
+ * C5=F1*Vmax/(LS*Imax*TF_RATE) ≈ 20693 — fits in int16_t.
+ * GAIN1 scaled from original -19661 (F1=16384) → -9830 (F1=8192, same effective gain). */
+#define F1                                  8192
 #define F2                                  8192
-#define F1_LOG                              LOG2((16384))
+#define F1_LOG                              LOG2((8192))
 #define F2_LOG                              LOG2((8192))
 
 /* State observer constants */
-#define GAIN1                               -19661
+#define GAIN1                               -9830
 #define GAIN2                               19648
 
 /* Only in case PLL is used, PLL gains */
@@ -59,8 +63,8 @@
 #define STO_FIFO_DEPTH_DPP                  64 /*!< Depth of the FIFO used  to average mechanical speed in dpp format */
 #define STO_FIFO_DEPTH_DPP_LOG              LOG2((64))
 #define STO_FIFO_DEPTH_UNIT                 64 /*!< Depth of the FIFO used to average mechanical speed in the unit defined by #SPEED_UNIT */
-#define M1_BEMF_CONSISTENCY_TOL             38 /* Parameter for B-emf amplitude-speed consistency */
-#define M1_BEMF_CONSISTENCY_GAIN            32 /* Parameter for B-emf amplitude-speed consistency */
+#define M1_BEMF_CONSISTENCY_TOL             64 /* Parameter for B-emf amplitude-speed consistency */
+#define M1_BEMF_CONSISTENCY_GAIN            16 /* Parameter for B-emf amplitude-speed consistency */
 
 /* USER CODE BEGIN angle reconstruction M1 */
 #define PARK_ANGLE_COMPENSATION_FACTOR      0
@@ -78,13 +82,16 @@
 #define REGULATION_EXECUTION_RATE           1 /*!< FOC execution rate in number of PWM cycles */
 #define ISR_FREQUENCY_HZ                    (PWM_FREQUENCY/REGULATION_EXECUTION_RATE) /*!< @brief FOC execution rate in Hz */
 
-/* Gains values for torque and flux control loops */
-#define PID_TORQUE_KP_DEFAULT               2466
-#define PID_TORQUE_KI_DEFAULT               3945
-#define PID_TORQUE_KD_DEFAULT               100
-#define PID_FLUX_KP_DEFAULT                 2466
-#define PID_FLUX_KI_DEFAULT                 3945
-#define PID_FLUX_KD_DEFAULT                 100
+/* Gains values for torque and flux control loops
+ * Firmware uses Ls=5µH (model), true motor Ls~1µH.  Kp/Ki scale with Ls:
+ * base values at Ls=1µH were Kp=247, Ki=395; ×5 for Ls=5µH model.
+ * Refine with Motor Pilot live parameter write after startup is confirmed. */
+#define PID_TORQUE_KP_DEFAULT               1235
+#define PID_TORQUE_KI_DEFAULT               1975
+#define PID_TORQUE_KD_DEFAULT               0
+#define PID_FLUX_KP_DEFAULT                 1235
+#define PID_FLUX_KI_DEFAULT                 1975
+#define PID_FLUX_KD_DEFAULT                 0
 
 /* Torque/Flux control loop gains dividers*/
 #define TF_KPDIV                            4096
@@ -115,7 +122,7 @@
 /* USER CODE END PID_SPEED_INTEGRAL_INIT_DIV */
 
 #define SPD_DIFFERENTIAL_TERM_ENABLING      DISABLE
-#define IQMAX_A                             3
+#define IQMAX_A                             2 /*!< Identified Imax 2 Apk */
 
 /* Default settings */
 #define DEFAULT_CONTROL_MODE                MCM_SPEED_MODE
@@ -145,27 +152,27 @@
 /* Phase 1 */
 #define PHASE1_DURATION                     1200 /*milliseconds */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              1.6
+#define PHASE1_FINAL_CURRENT_A              1.8
 
 /* Phase 2 */
 #define PHASE2_DURATION                     1200 /*milliseconds */
 #define PHASE2_FINAL_SPEED_UNIT             (500*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              1.6
+#define PHASE2_FINAL_CURRENT_A              1.8
 
 /* Phase 3 */
 #define PHASE3_DURATION                     1200 /*milliseconds */
 #define PHASE3_FINAL_SPEED_UNIT             (1500*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              1.6
+#define PHASE3_FINAL_CURRENT_A              1.8
 
 /* Phase 4 */
 #define PHASE4_DURATION                     1500 /*milliseconds */
 #define PHASE4_FINAL_SPEED_UNIT             (2600*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              1.6
+#define PHASE4_FINAL_CURRENT_A              1.8
 
 /* Phase 5 */
 #define PHASE5_DURATION                     6000 /* milliseconds */
 #define PHASE5_FINAL_SPEED_UNIT             (6500*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              1.6
+#define PHASE5_FINAL_CURRENT_A              1.8
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
@@ -173,7 +180,7 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               6000
+#define OBS_MINIMUM_SPEED_RPM               3000
 #define NB_CONSECUTIVE_TESTS                4 /* corresponding to former
                                                  NB_CONSECUTIVE_TESTS / (TF_REGULATION_RATE / MEDIUM_FREQUENCY_TASK_RATE) */
 #define SPEED_BAND_UPPER_LIMIT              21 /*!< It expresses how much estimated speed can exceed forced stator electrical

@@ -68,6 +68,11 @@ Two files own USART2 exclusively — ASPEP/MCP is disabled:
 - `ESC_TIMEOUT_MS 500` — stop motor if no command for 500 ms
 - `ESC_TELEMETRY_EVERY 100` — send telemetry every 100 calls (~10 Hz)
 
+**Sensorless operating limits (hardware-verified):**
+- **Minimum reliable speed: ±2500 RPM** — below this the BEMF signal is too weak for the STO observer to hold lock under load (Ke=0.25 V/kRPM → only ~0.625 V at 2500 RPM against 12 V bus)
+- **Full stall faults** — if the axle is stopped by external load the observer will lose lock and raise `Speed Feedback` fault; this is a physics constraint of sensorless FOC, not a firmware bug
+- Observer handoff happens at 3000 RPM during rev-up (`OBS_MINIMUM_SPEED_RPM`)
+
 **Safety rules enforced:**
 - `esc_cmd_value` initialised to `0x7FFF` (non-neutral) — WAIT_NEUTRAL blocks until host explicitly sends neutral
 - Direction reversal (FORWARD↔REVERSE) always passes through BRAKE; motor must reach IDLE before restarting
@@ -110,7 +115,7 @@ HAL / CMSIS            STM32G4xx_HAL_Driver/, CMSIS/
 | File | Role |
 |------|------|
 | `drive_parameters.h` | PWM frequency (25 kHz), FOC rate, observer gains |
-| `pmsm_motor_parameters.h` | Motor electrical params: pole pairs=2, Rs=0.1Ω, Ls=10µH |
+| `pmsm_motor_parameters.h` | Motor electrical params: pole pairs=2, Rs=0.1Ω, Ls=5µH (firmware model; true measured ~1µH) |
 | `mc_api.h` | Public motor control API declarations |
 | `mc_type.h` | Fault codes, state enum, type definitions |
 

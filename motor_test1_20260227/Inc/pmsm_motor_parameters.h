@@ -30,8 +30,13 @@
 /***************** MOTOR ELECTRICAL PARAMETERS  ******************************/
 #define POLE_PAIR_NUM           2 /* Number of motor pole pairs */
 #define RS                      0.1 /* Stator resistance , ohm*/
-#define LS                      0.00001 /* Stator inductance, H
-                                                 For I-PMSM it is equal to Lq */
+#define LS                      0.000005 /* Stator inductance, H (5 µH — inflated for observer
+                                                 stability; true measured value is ~1 µH but
+                                                 τ=Ls/Rs=10µs < Ts=40µs makes the discrete-time
+                                                 observer unstable at the 25 kHz FOC rate.
+                                                 Using 5 µH gives C1/F1=0.8 (stable) while keeping
+                                                 C5 within int16_t range.  Tune Kp/Ki in Motor Pilot
+                                                 to compensate the detuned current loop.) */
 
 /* When using Id = 0, NOMINAL_CURRENT is utilized to saturate the output of the
    PID for speed regulation (i.e. reference torque).
@@ -41,11 +46,11 @@
                                    *Amplifying network gain)/(MCU supply voltage/2)
 */
 
-#define MOTOR_VOLTAGE_CONSTANT  0.3 /*!< Volts RMS ph-ph /kRPM */
+#define MOTOR_VOLTAGE_CONSTANT  0.25 /*!< Volts RMS ph-ph /kRPM -- Motor Pilot identification result (theoretical ~0.228 for 3100KV) */
 #define MOTOR_MAX_SPEED_RPM     15000 /*!< Maximum rated speed  */
-#define NOMINAL_CURRENT_A       3
+#define NOMINAL_CURRENT_A       2   /*!< Identified Imax 2 Apk */
 
-#define ID_DEMAG_A              -3 /*!< Demagnetization current */
+#define ID_DEMAG_A              -2 /*!< Demagnetization current -- matched to NOMINAL_CURRENT_A */
 
 /***************** MOTOR SENSORS PARAMETERS  ******************************/
 /* Motor sensors parameters are always generated but really meaningful only
