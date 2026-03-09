@@ -43,7 +43,7 @@ Progress this session:
         pmsm_motor_parameters.h, stm32g4xx_hal_msp.c from git after MCW runs.
   [x] Drivetrain no-load test at ±3000 RPM — PASSED (Motor Pilot, Debug build)
         Wheels off the ground, drivetrain spinning. Observer holds at 3000 RPM.
-        Disturbance test (hand-stop wheel) NOT yet performed.
+        Disturbance test (hand-load on axle) PASSED — see Section 9.
   [ ] UART-side issues still open — must be diagnosed before on-ground test.
 
 Working tree (this commit):
@@ -196,7 +196,7 @@ Observer limits (hardware-verified):
   Min reliable speed  : ±2500 RPM (BEMF physics floor, hardware-verified bench)
   Firmware speed floor: ±3000 RPM (ESC_MIN_SPEED_RPM = OBS_MINIMUM_SPEED_RPM)
   Drivetrain no-load  : ±3000 RPM verified with wheels off ground (Motor Pilot)
-  Disturbance test    : NOT YET performed (hand-stop under load)
+  Disturbance test    : PASSED — hand load on axle held, speed recovered, no fault
   Observer handoff    : 3000 RPM during rev-up (OBS_MINIMUM_SPEED_RPM)
   Full stall faults   : axle locked by external load → Speed Feedback fault
                         This is a physics constraint of sensorless FOC, not a bug.
@@ -247,8 +247,12 @@ Priority items to work on next:
         - BRAKE/direction-reversal: accidental sign flip handled correctly ✓
         - Disturbance rejection: external axle load rejected ✓
 
-  [ ] Disturbance test: hand-stop wheel while running (wheels off ground)
-        - Verify Speed Feedback fault triggers and auto-recovers correctly
+  [x] Disturbance test PASSED (hand-load on axle, wheels off ground):
+        - Speed loop increased torque to maintain RPM under hand load ✓
+        - Speed recovered correctly when load was removed ✓
+        - No Speed Feedback fault triggered at 3000+ RPM under hand load ✓
+        - Observer held lock through the full load/unload cycle ✓
+        - Full stall (axle stopped completely) NOT tested — expected to fault
 
   [ ] On-ground test — UART now working, ready to proceed
         - Observer floor at 3000 RPM verified no-load; confirm under axle load
