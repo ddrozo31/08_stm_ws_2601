@@ -103,7 +103,9 @@ __weak void MCboot( MCI_Handle_t* pMCIList[NBR_OF_MOTORS] )
     pMCIList[M1] = &Mci[M1];
     FOC_Init();
 
-    ASPEP_start(&aspepOverUartA);
+    /* ASPEP_start() disabled — USART2 is now owned by esc_comm (ESC_COMM_Init).  *
+     * Re-enable here when building the "tuning build" for Motor Pilot (Phase 3). */
+    /* ASPEP_start(&aspepOverUartA); */
     /* USER CODE BEGIN MCboot 1 */
 
     /* USER CODE END MCboot 1 */

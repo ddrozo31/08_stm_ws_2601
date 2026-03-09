@@ -35,7 +35,7 @@
 #include "mcp_config.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "esc_comm.h"   /* ESC_COMM_UART_RxISR -- called from USART2_IRQHandler */
 /* USER CODE END Includes */
 
 /** @addtogroup MCSDK
@@ -70,7 +70,17 @@ void SysTick_Handler(void);
 void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQHandler 0 */
-
+  ESC_COMM_UART_RxISR();  /* process one RXNE byte for ESC command frame parser */
+  /* ASPEP is disabled (ASPEP_start() commented out) so aspepOverUartA is
+   * uninitialised.  Clear all status flags the generated handler acts on before
+   * it runs, to prevent it from calling ASPEP_HWDataTransmittedIT (on TC),
+   * ASPEP_HWReset (on ORE/FE/NE → IDLE), or enabling DMA RX.
+   *   TCCF  – our direct-register TX sets TC after the last byte is sent
+   *   ORECF – overrun can occur while SysTick holds USART2 in SendTelemetry
+   *   FECF/NECF – framing/noise; safe to clear, no ESC parser impact
+   *   IDLECF – IDLE is enabled by the ORE error-recovery path; clear it too  */
+  WRITE_REG(USARTA->ICR, USART_ICR_TCCF | USART_ICR_FECF | USART_ICR_ORECF
+                        | USART_ICR_NECF | USART_ICR_IDLECF);
   /* USER CODE END USART2_IRQHandler 0 */
   uint32_t flags;
   uint32_t activeIdleFlag;
