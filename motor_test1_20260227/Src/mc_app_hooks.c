@@ -78,28 +78,25 @@ typedef enum
 
 /* Parameters --------------------------------------------------------------- */
 
-/* |u|=1.0 maps to this RPM (forward and reverse). */
-#define ESC_MAX_SPEED_RPM     15000.0f
+/* Rev-up target speed (RPM): the speed programmed into the speed loop while
+ * the motor is still in open-loop START state.  Once the STO observer locks
+ * and the motor transitions to RUN, torque mode takes over and this value is
+ * no longer used.  Must be >= OBS_MINIMUM_SPEED_RPM (1500). */
+#define ESC_REVUP_SPEED_RPM   1500.0f
 
-/* Minimum commanded speed (RPM).  Matched to OBS_MINIMUM_SPEED_RPM.
- * Lowered 3000->1500 because the motor runs ~2000 RPM under full drivetrain
- * load; the old 3000 RPM floor kept the motor in a speed-error / max-Iq
- * condition that destabilised the observer. */
-#define ESC_MIN_SPEED_RPM     1500.0f
+/* Speed ramp applied during the rev-up transition (ms). */
+#define ESC_REVUP_RAMP_MS     500U
 
-/* Speed ramp duration applied on each drive command (ms).
- * 1000 ms: prevents large speed-error spikes under drivetrain load which
- * saturate the speed PID and destabilise the STO observer. */
-#define ESC_RAMP_MS           1000U
+/* Maximum torque current (Amps).  |u|=1.0 maps to this Iq.
+ * Matches IQMAX_A in drive_parameters.h. */
+#define ESC_MAX_IQ_A          10.0f
+
+/* Torque ramp duration (ms).  Short: torque response should track the
+ * joystick quickly; the load sets the actual speed. */
+#define ESC_TORQUE_RAMP_MS    50U
 
 /* |u| below this threshold is treated as neutral. */
 #define ESC_NEUTRAL_DEADBAND  0.02f
-
-/* Clamp a signed RPM value so its magnitude is never below ESC_MIN_SPEED_RPM.
- * Preserves sign so forward/reverse commands both get the floor applied. */
-#define ESC_CLAMP_RPM(rpm) \
-  (((rpm) >= 0.0f) ? ((rpm) < ESC_MIN_SPEED_RPM ? ESC_MIN_SPEED_RPM : (rpm)) \
-                   : ((rpm) > -ESC_MIN_SPEED_RPM ? -ESC_MIN_SPEED_RPM : (rpm)))
 
 /* Time without a valid command before stopping the motor (ms).
  * Applies only in FORWARD and REVERSE. */
@@ -195,18 +192,15 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
 
     /* ---------------------------------------------------------------------- */
     case ESC_READY:
-      /* Motor is stopped. Accept drive commands in either direction directly.
-       * Require new_cmd to avoid restarting on a stale esc_cmd_value left over
-       * from a previous FORWARD/REVERSE cycle (e.g. after timeout fires and
-       * motor stops, the old non-neutral value must not cause an immediate
-       * restart).
-       * Only transition if MC_StartMotor1() succeeds — it returns false when
-       * the MCSDK is not in IDLE (e.g. FAULT_OVER not yet acknowledged). */
+      /* Motor is stopped. Accept drive commands in either direction.
+       * Require new_cmd to avoid restarting on a stale command value.
+       * Start with a speed-mode rev-up target; torque mode takes over once
+       * the STO observer locks and the MCSDK transitions to RUN state. */
       if ((new_cmd != 0U) && (u > ESC_NEUTRAL_DEADBAND))
       {
         if (MC_StartMotor1())
         {
-          (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+          (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
           esc_state = ESC_FORWARD;
         }
       }
@@ -214,7 +208,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       {
         if (MC_StartMotor1())
         {
-          (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+          (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
           esc_state = ESC_REVERSE;
         }
       }
@@ -241,11 +235,13 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         }
         esc_state = ESC_BRAKE;
       }
-      else
+      else if (mci_st == RUN)
       {
-        /* Continuing forward: refresh the speed ramp with the latest command. */
-        (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+        /* Observer locked, closed-loop active: torque mode.
+         * Joystick maps directly to Iq — speed is set by the load. */
+        (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
       }
+      /* Still in START (rev-up): speed ramp set at entry, no update needed. */
       break;
 
     /* ---------------------------------------------------------------------- */
@@ -260,7 +256,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           /* Reverse pending: motor is stopped, safe to start in reverse. */
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
             esc_state = ESC_REVERSE;
           }
         }
@@ -269,7 +265,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           /* Changed mind during braking: go forward instead. */
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
             esc_state = ESC_FORWARD;
           }
         }
@@ -302,11 +298,13 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         }
         esc_state = ESC_BRAKE;
       }
-      else
+      else if (mci_st == RUN)
       {
-        /* Continuing reverse: refresh the speed ramp (u is negative → negative RPM). */
-        (void)MC_ProgramSpeedRampMotor1_F(ESC_CLAMP_RPM(u * ESC_MAX_SPEED_RPM), ESC_RAMP_MS);
+        /* Observer locked, closed-loop active: torque mode.
+         * u is negative here → negative Iq → reverse torque. */
+        (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
       }
+      /* Still in START (rev-up): speed ramp set at entry, no update needed. */
       break;
 
     /* ---------------------------------------------------------------------- */
