@@ -239,9 +239,21 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       }
       else if (mci_st == RUN)
       {
-        /* Observer locked, closed-loop active: torque mode.
-         * Joystick maps directly to Iq — speed is set by the load. */
-        (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
+        /* Direction sanity: STO observer can converge to the 180-deg wrong
+         * angle solution.  If estimated speed sign disagrees with the forward
+         * command, stop cleanly back to READY so the user can retry without
+         * having to re-send neutral (avoids the FAULT -> WAIT_NEUTRAL path). */
+        if (speed < -50.0f)
+        {
+          (void)MC_StopMotor1();
+          esc_state = ESC_READY;
+        }
+        else
+        {
+          /* Observer locked at correct angle: torque mode.
+           * Joystick maps directly to Iq -- speed is set by the load. */
+          (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
+        }
       }
       /* Still in START (rev-up): speed ramp set at entry, no update needed. */
       break;
@@ -302,9 +314,20 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       }
       else if (mci_st == RUN)
       {
-        /* Observer locked, closed-loop active: torque mode.
-         * u is negative here → negative Iq → reverse torque. */
-        (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
+        /* Direction sanity: same as FORWARD -- if observer locked at wrong
+         * angle, estimated speed will be positive despite reverse command.
+         * Stop cleanly back to READY for immediate retry. */
+        if (speed > 50.0f)
+        {
+          (void)MC_StopMotor1();
+          esc_state = ESC_READY;
+        }
+        else
+        {
+          /* Observer locked at correct angle: torque mode.
+           * u is negative here -- negative Iq -- reverse torque. */
+          (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
+        }
       }
       /* Still in START (rev-up): speed ramp set at entry, no update needed. */
       break;

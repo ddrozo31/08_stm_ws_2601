@@ -188,7 +188,7 @@
 #define SPEED_BAND_LOWER_LIMIT              11 /*!< It expresses how much estimated speed can be below forced stator electrical
                                                  without being considered wrong. In 1/16 of forced speed */
 
-#define TRANSITION_DURATION                 200 /* Switch over duration, ms */
+#define TRANSITION_DURATION                 500 /* Switch over duration, ms â€” increased for angle convergence */
 
 /******************************   BUS VOLTAGE Motor 1  **********************/
 #define  M1_VBUS_SAMPLING_TIME              LL_ADC_SAMPLING_CYCLE(47)
