@@ -150,7 +150,7 @@
 /******************************   START-UP PARAMETERS   **********************/
 
 /* Phase 1 */
-#define PHASE1_DURATION                     1200 /*milliseconds */
+#define PHASE1_DURATION                     300 /*milliseconds */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
 #define PHASE1_FINAL_CURRENT_A              1.8
 

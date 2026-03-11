@@ -255,7 +255,20 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
         }
       }
-      /* Still in START (rev-up): speed ramp set at entry, no update needed. */
+      else if (mci_st == IDLE)
+      {
+        /* Motor exited to IDLE while joystick is still commanding forward
+         * (observer failed or direction-check rejected).  Auto-restart so
+         * the car keeps moving without requiring the user to re-push. */
+        if (new_cmd != 0U)
+        {
+          if (MC_StartMotor1())
+          {
+            (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+          }
+        }
+      }
+      /* START: open-loop rev-up in progress, no action needed. */
       break;
 
     /* ---------------------------------------------------------------------- */
@@ -329,7 +342,18 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
         }
       }
-      /* Still in START (rev-up): speed ramp set at entry, no update needed. */
+      else if (mci_st == IDLE)
+      {
+        /* Same as FORWARD: auto-restart in reverse if joystick still pushed. */
+        if (new_cmd != 0U)
+        {
+          if (MC_StartMotor1())
+          {
+            (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+          }
+        }
+      }
+      /* START: open-loop rev-up in progress, no action needed. */
       break;
 
     /* ---------------------------------------------------------------------- */
