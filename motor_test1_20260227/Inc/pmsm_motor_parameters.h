@@ -48,9 +48,9 @@
 
 #define MOTOR_VOLTAGE_CONSTANT  0.25 /*!< Volts RMS ph-ph /kRPM -- Motor Pilot identification result (theoretical ~0.228 for 3100KV) */
 #define MOTOR_MAX_SPEED_RPM     15000 /*!< Maximum rated speed  */
-#define NOMINAL_CURRENT_A       2   /*!< Identified Imax 2 Apk */
+#define NOMINAL_CURRENT_A       10  /*!< Raised 5->10A for on-ground load */
 
-#define ID_DEMAG_A              -2 /*!< Demagnetization current -- matched to NOMINAL_CURRENT_A */
+#define ID_DEMAG_A              -10 /*!< Demagnetization current -- matched to NOMINAL_CURRENT_A */
 
 /***************** MOTOR SENSORS PARAMETERS  ******************************/
 /* Motor sensors parameters are always generated but really meaningful only
