@@ -36,7 +36,7 @@
 #define M1_SS_MEAS_ERRORS_BEFORE_FAULTS     3 /*!< Number of speed measurement errors before main sensor goes in fault */
 
 /****** State Observer + PLL ****/
-#define VARIANCE_THRESHOLD                  0.99 /*!< Max tolerance: fault only on total observer divergence under drivetrain load */
+#define VARIANCE_THRESHOLD                  0.80 /*!< Max tolerance: default proven value */
 
 /* State observer scaling factors F1
  * Ls=5µH (firmware model) with F1=8192 gives C1=F1*RS/(LS*TF_RATE)=8192*0.1/(5e-6*25000)=6554
@@ -49,12 +49,12 @@
 #define F2_LOG                              LOG2((8192))
 
 /* State observer constants */
-#define GAIN1                               -16000  /* Increased from -9830: faster BEMF tracking at low speed under load */
+#define GAIN1                               -9830  /* Original stable value (equiv. -19661 at F1=16384) */
 #define GAIN2                               19648
 
 /* Only in case PLL is used, PLL gains */
-#define PLL_KP_GAIN                         1500  /* Increased from 638: faster angle tracking at ~2000 RPM BEMF level */
-#define PLL_KI_GAIN                         60  /* Increased from 18: faster angle lock under drivetrain load */
+#define PLL_KP_GAIN                         638  /* Original stable value */
+#define PLL_KI_GAIN                         18  /* Original stable value */
 #define PLL_KPDIV                           16384
 #define PLL_KPDIV_LOG                       LOG2((PLL_KPDIV))
 #define PLL_KIDIV                           65535
@@ -152,27 +152,27 @@
 /* Phase 1 */
 #define PHASE1_DURATION                     1200 /*milliseconds */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              4.0
+#define PHASE1_FINAL_CURRENT_A              1.8
 
 /* Phase 2 */
 #define PHASE2_DURATION                     1200 /*milliseconds */
 #define PHASE2_FINAL_SPEED_UNIT             (500*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              4.0
+#define PHASE2_FINAL_CURRENT_A              1.8
 
 /* Phase 3 */
 #define PHASE3_DURATION                     1200 /*milliseconds */
 #define PHASE3_FINAL_SPEED_UNIT             (1500*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              4.0
+#define PHASE3_FINAL_CURRENT_A              1.8
 
 /* Phase 4 */
 #define PHASE4_DURATION                     1500 /*milliseconds */
 #define PHASE4_FINAL_SPEED_UNIT             (2600*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              4.0
+#define PHASE4_FINAL_CURRENT_A              1.8
 
 /* Phase 5 */
 #define PHASE5_DURATION                     6000 /* milliseconds */
 #define PHASE5_FINAL_SPEED_UNIT             (6500*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              4.0
+#define PHASE5_FINAL_CURRENT_A              1.8
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
