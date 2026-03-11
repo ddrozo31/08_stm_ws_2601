@@ -9,9 +9,11 @@ Command frame  (PC -> STM32)  5 bytes:
   [0xAA] [cmd_lo] [cmd_hi] [0x00] [XOR_chk]
    SOF    int16_t u  (-32768=-1.0 / +32767=+1.0)   XOR(bytes 1..3)
 
-Telemetry frame (STM32 -> PC) 10 bytes:
-  [0xBB] [spd_lo] [spd_hi] [state] [faults] [u_lo] [u_hi] [v_lo] [v_hi] [XOR_chk]
-   SOF    int16 RPM          ESC     bitmask  int16 cmd     uint16 V     XOR(bytes 1..8)
+Telemetry frame (STM32 -> PC) 15 bytes:
+  [0xBB][spd_lo][spd_hi][esc_st][faults][u_lo][u_hi][v_lo][v_hi]
+        [iq_lo][iq_hi][id_lo][id_hi][mcsdk_st][XOR_chk]
+   SOF   int16 RPM  ESC st  faults  int16 cmd  uint16 V
+         int16 iq(mA)  int16 id(mA)  mcsdk_st  XOR(bytes 1..13)
 
 ESC state byte:
   0=BOOT  1=WAIT_NEUTRAL  2=READY  3=FORWARD  4=BRAKE  5=REVERSE  6=FAULT
@@ -40,7 +42,7 @@ CMD_HZ    = 10          # command send rate (Hz) -- must be faster than 500 ms t
 CMD_SOF       = 0xAA
 TLM_SOF       = 0xBB
 CMD_FRAME_LEN = 5
-TLM_FRAME_LEN = 10
+TLM_FRAME_LEN = 15
 
 # ESC_State_t enum values (from mc_app_hooks.c)
 STATE_NAMES = {
@@ -64,6 +66,19 @@ FAULT_BITS = {
     0x80: 'SW_ERROR',
 }
 
+
+# MCSDK internal state (MCI_State_t)
+MCSDK_STATE_NAMES = {
+    0:  'IDLE',
+    4:  'START',
+    6:  'RUN',
+    10: 'FAULT_NOW',
+    11: 'FAULT_OVER',
+    12: 'ICLWAIT',
+}
+
+def decode_mcsdk_state(b: int) -> str:
+    return MCSDK_STATE_NAMES.get(b, f'MC_{b}')
 # -- Frame builders / decoders -------------------------------------------------
 
 def build_command(u: float) -> bytes:
@@ -84,17 +99,24 @@ def decode_faults(b: int) -> str:
     return ' | '.join(name for bit, name in FAULT_BITS.items() if b & bit) or f'0x{b:02X}'
 
 def parse_telemetry(frame: bytes):
-    """Return (speed_rpm, state_str, fault_str, u_float, vbus_v) or None on bad checksum."""
+    """Return (speed_rpm, state_str, fault_str, u_float, vbus_v, iq_a, id_a, mcsdk_str)
+    or None on bad checksum."""
     if len(frame) != TLM_FRAME_LEN or frame[0] != TLM_SOF:
         return None
-    chk = frame[1] ^ frame[2] ^ frame[3] ^ frame[4] ^ frame[5] ^ frame[6] ^ frame[7] ^ frame[8]
-    if chk != frame[9]:
+    chk = 0
+    for i in range(1, 14):
+        chk ^= frame[i]
+    if chk != frame[14]:
         return None
     speed  = struct.unpack_from('<h', frame, 1)[0]   # int16 RPM
     cmd_r  = struct.unpack_from('<h', frame, 5)[0]   # int16 raw command
     vbus   = struct.unpack_from('<H', frame, 7)[0]   # uint16 Volts
+    iq_ma  = struct.unpack_from('<h', frame, 9)[0]   # int16 milliAmps
+    id_ma  = struct.unpack_from('<h', frame, 11)[0]  # int16 milliAmps
     u_val  = cmd_r / 32767.0
-    return speed, decode_state(frame[3]), decode_faults(frame[4]), u_val, vbus
+    return (speed, decode_state(frame[3]), decode_faults(frame[4]),
+            u_val, vbus, iq_ma / 1000.0, id_ma / 1000.0,
+            decode_mcsdk_state(frame[13]))
 
 # -- Background threads --------------------------------------------------------
 
@@ -144,9 +166,11 @@ def reader_thread(ser: serial.Serial, stop: threading.Event):
             if result is None:
                 buf.pop(0)
                 continue
-            speed, state, faults, u_val, vbus = result
+            speed, state, faults, u_val, vbus, iq_a, id_a, mc_st = result
             print(f"\r  [TLM]  spd={speed:6d} RPM  state={state:<14}"
-                  f"  u={u_val:+.3f}  vbus={vbus:3d} V  faults={faults}",
+                  f"  u={u_val:+.3f}  vbus={vbus:3d} V"
+                  f"  iq={iq_a:+.3f}A  id={id_a:+.3f}A"
+                  f"  mc={mc_st}  faults={faults}",
                   flush=True)
             buf = buf[TLM_FRAME_LEN:]
 

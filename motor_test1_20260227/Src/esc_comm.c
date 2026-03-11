@@ -105,22 +105,30 @@ uint8_t ESC_COMM_HasNewCommand(void)
   * @param faults     Lower byte of MC_GetCurrentFaultsMotor1().
   */
 void ESC_COMM_SendTelemetry(int16_t speed_rpm, uint8_t state, uint8_t faults,
-                            int16_t cmd_raw, uint16_t vbus_v)
+                            int16_t cmd_raw, uint16_t vbus_v,
+                            int16_t iq_ma, int16_t id_ma, uint8_t mcsdk_st)
 {
   uint8_t frame[ESC_TLM_FRAME_LEN];
 
-  /* [0xBB][spd_lo][spd_hi][state][faults][u_lo][u_hi][v_lo][v_hi][chk] */
-  frame[0] = ESC_TLM_SOF;
-  frame[1] = (uint8_t)( speed_rpm & 0xFF);
-  frame[2] = (uint8_t)((speed_rpm >> 8) & 0xFF);
-  frame[3] = state;
-  frame[4] = faults;
-  frame[5] = (uint8_t)( cmd_raw & 0xFF);
-  frame[6] = (uint8_t)((cmd_raw >> 8) & 0xFF);
-  frame[7] = (uint8_t)( vbus_v & 0xFF);
-  frame[8] = (uint8_t)((vbus_v >> 8) & 0xFF);
-  frame[9] = frame[1] ^ frame[2] ^ frame[3] ^ frame[4] ^
-             frame[5] ^ frame[6] ^ frame[7] ^ frame[8];
+  /* [0xBB][spd_lo][spd_hi][esc_st][faults][u_lo][u_hi][v_lo][v_hi]
+   *       [iq_lo][iq_hi][id_lo][id_hi][mcsdk_st][XOR of bytes 1..13] */
+  frame[0]  = ESC_TLM_SOF;
+  frame[1]  = (uint8_t)( speed_rpm & 0xFF);
+  frame[2]  = (uint8_t)((speed_rpm >> 8) & 0xFF);
+  frame[3]  = state;
+  frame[4]  = faults;
+  frame[5]  = (uint8_t)( cmd_raw & 0xFF);
+  frame[6]  = (uint8_t)((cmd_raw >> 8) & 0xFF);
+  frame[7]  = (uint8_t)( vbus_v & 0xFF);
+  frame[8]  = (uint8_t)((vbus_v >> 8) & 0xFF);
+  frame[9]  = (uint8_t)( iq_ma & 0xFF);
+  frame[10] = (uint8_t)((iq_ma >> 8) & 0xFF);
+  frame[11] = (uint8_t)( id_ma & 0xFF);
+  frame[12] = (uint8_t)((id_ma >> 8) & 0xFF);
+  frame[13] = mcsdk_st;
+  frame[14] = frame[1]  ^ frame[2]  ^ frame[3]  ^ frame[4]  ^
+              frame[5]  ^ frame[6]  ^ frame[7]  ^ frame[8]  ^
+              frame[9]  ^ frame[10] ^ frame[11] ^ frame[12] ^ frame[13];
 
   for (uint8_t i = 0U; i < ESC_TLM_FRAME_LEN; i++)
   {

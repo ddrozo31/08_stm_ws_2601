@@ -88,8 +88,10 @@ typedef enum
 #define ESC_REVUP_RAMP_MS     500U
 
 /* Maximum torque current (Amps).  |u|=1.0 maps to this Iq.
- * Matches IQMAX_A in drive_parameters.h. */
-#define ESC_MAX_IQ_A          10.0f
+ * 2.5 A: rosbag analysis confirmed stable operation up to ~1.1A (u=0.75).
+ * Raising ceiling so full joystick range produces meaningful thrust.
+ * If observer loses lock (WAIT_NEUTRAL without FAULT), reduce back to 2.0A. */
+#define ESC_MAX_IQ_A          2.5f
 
 /* Torque ramp duration (ms).  Short: torque response should track the
  * joystick quickly; the load sets the actual speed. */
@@ -336,8 +338,13 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
     uint8_t  fault_b = (uint8_t)(faults & 0xFFU);
     int16_t  cmd_raw = ESC_COMM_GetCommand();
     uint16_t vbus_v  = VBS_GetAvBusVoltage_V((const BusVoltageSensor_Handle_t *)&BusVoltageSensor_M1);
+    qd_f_t   iqd     = MC_GetIqdMotor1_F();
+    int16_t  iq_ma   = (int16_t)(iqd.q * 1000.0f);   /* Amps -> milliAmps */
+    int16_t  id_ma   = (int16_t)(iqd.d * 1000.0f);
+    uint8_t  mc_st   = (uint8_t)mci_st;
 
-    ESC_COMM_SendTelemetry(spd_rpm, esc_st, fault_b, cmd_raw, vbus_v);
+    ESC_COMM_SendTelemetry(spd_rpm, esc_st, fault_b, cmd_raw, vbus_v,
+                           iq_ma, id_ma, mc_st);
   }
 
 /* USER SECTION BEGIN PostMediumFrequencyHookM1 */
