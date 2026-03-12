@@ -36,7 +36,7 @@
 #define M1_SS_MEAS_ERRORS_BEFORE_FAULTS     3 /*!< Number of speed measurement errors before main sensor goes in fault */
 
 /****** State Observer + PLL ****/
-#define VARIANCE_THRESHOLD                  0.80 /*!< Max tolerance: default proven value */
+#define VARIANCE_THRESHOLD                  0.99 /*!< Very tolerant: fault only on total divergence; needed at 1500 RPM weak BEMF */
 
 
 /* State observer scaling factors F1
@@ -50,12 +50,12 @@
 #define F2_LOG                              LOG2((8192))
 
 /* State observer constants */
-#define GAIN1                               -9830  /* Original stable value (equiv. -19661 at F1=16384) */
+#define GAIN1                               -16000  /* Increased: faster BEMF tracking at 1500 RPM weak BEMF under load */
 #define GAIN2                               19648
 
 /* Only in case PLL is used, PLL gains */
-#define PLL_KP_GAIN                         638  /* Original stable value */
-#define PLL_KI_GAIN                         18  /* Original stable value */
+#define PLL_KP_GAIN                         1500  /* Increased: faster angle tracking at low-speed BEMF */
+#define PLL_KI_GAIN                         60  /* Increased: faster angle lock under drivetrain load */
 #define PLL_KPDIV                           16384
 #define PLL_KPDIV_LOG                       LOG2((PLL_KPDIV))
 #define PLL_KIDIV                           65535
@@ -151,29 +151,29 @@
 /******************************   START-UP PARAMETERS   **********************/
 
 /* Phase 1 */
-#define PHASE1_DURATION                     300 /*milliseconds */
+#define PHASE1_DURATION                     1200 /*milliseconds -- longer alignment for stall-start */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              3.5
+#define PHASE1_FINAL_CURRENT_A              4.0
 
 /* Phase 2 */
 #define PHASE2_DURATION                     1200 /*milliseconds */
 #define PHASE2_FINAL_SPEED_UNIT             (500*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              3.5
+#define PHASE2_FINAL_CURRENT_A              4.0
 
 /* Phase 3 */
 #define PHASE3_DURATION                     1200 /*milliseconds */
 #define PHASE3_FINAL_SPEED_UNIT             (1500*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              3.5
+#define PHASE3_FINAL_CURRENT_A              4.0
 
 /* Phase 4 */
 #define PHASE4_DURATION                     1500 /*milliseconds */
 #define PHASE4_FINAL_SPEED_UNIT             (2600*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              3.5
+#define PHASE4_FINAL_CURRENT_A              4.0
 
 /* Phase 5 */
 #define PHASE5_DURATION                     6000 /* milliseconds */
 #define PHASE5_FINAL_SPEED_UNIT             (6500*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              3.5
+#define PHASE5_FINAL_CURRENT_A              4.0
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
@@ -181,7 +181,7 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               3500  /* Switch-over at 3500 RPM: BEMF 75% stronger than 2000; motor reaches this in open-loop */
+#define OBS_MINIMUM_SPEED_RPM               1500  /* Handoff at 1500 RPM (matches 903c040 that briefly moved the car) */
 #define NB_CONSECUTIVE_TESTS                4 /* corresponding to former
                                                  NB_CONSECUTIVE_TESTS / (TF_REGULATION_RATE / MEDIUM_FREQUENCY_TASK_RATE) */
 #define SPEED_BAND_UPPER_LIMIT              21 /*!< It expresses how much estimated speed can exceed forced stator electrical
