@@ -40,10 +40,10 @@
 
 
 /* State observer scaling factors F1
- * Ls=4uH, Rs=50mOhm: C1=F1*RS/(LS*TF_RATE)=8192*0.05/(4e-6*25000)=4096
- * and C1/F1=0.5 -- stable (requires C1/F1 < 1). Better current model vs old 5uH/0.1Ohm.
- * C5 ~= 20693*(5/4) = 25866 -- fits in int16_t (3uH would overflow at ~34488).
- * GAIN1 scaled from original -19661 (F1=16384) -> -9830 (F1=8192, same effective gain). */
+ * Ls=10uH, Rs=100mOhm (Motor Pilot measured): C1=F1*RS/(LS*TF_RATE)=8192*0.1/(10e-6*25000)=3277
+ * and C1/F1=0.40 -- stable (requires C1/F1 < 1).
+ * C5 ~= 25866*(4/10) = 10346 -- well within int16_t range (was 25866 at Ls=4uH).
+ * GAIN1=-9830, F1=8192: stable baseline (verified hardware). */
 #define F1                                  8192
 #define F2                                  8192
 #define F1_LOG                              LOG2((8192))
@@ -84,10 +84,10 @@
 #define ISR_FREQUENCY_HZ                    (PWM_FREQUENCY/REGULATION_EXECUTION_RATE) /*!< @brief FOC execution rate in Hz */
 
 /* Gains values for torque and flux control loops
- * Firmware uses Ls=5µH (model), true motor Ls~1µH.  Kp/Ki scale with Ls:
- * base values at Ls=1µH were Kp=247, Ki=395; ×5 for Ls=5µH model.
- * Refine with Motor Pilot live parameter write after startup is confirmed. */
-#define PID_TORQUE_KP_DEFAULT               247  /* Ls=1uH true motor; x5=1235 was wrong (loop saw real Ls, not model) */
+ * Motor Pilot measured Rs=0.1 Ohm, Ls=10 uH. Pole-zero cancellation verified:
+ * KI/KP*(KPDIV/KIDIV) = (395/247)*(4096/16384) = 0.400 = Ts*Rs/Ls = 40e-6*0.1/10e-6.
+ * Bandwidth: (247/4096)*5.52/10e-6 ~ 33000 rad/s ~ 5300 Hz. No change needed. */
+#define PID_TORQUE_KP_DEFAULT               247  /* Motor Pilot Rs=0.1 Ohm, Ls=10 uH -- pole-zero cancellation verified */
 #define PID_TORQUE_KI_DEFAULT               395
 #define PID_TORQUE_KD_DEFAULT               0
 #define PID_FLUX_KP_DEFAULT                 247

@@ -29,12 +29,12 @@
 
 /***************** MOTOR ELECTRICAL PARAMETERS  ******************************/
 #define POLE_PAIR_NUM           2 /* Number of motor pole pairs */
-#define RS                      0.050 /* Stator resistance , ohm -- educated guess 50mOhm typical for 3100KV RC motor */
-#define LS                      0.000004 /* Stator inductance, H (4 uH -- reduced from 5 uH;
-                                                 true value ~1 uH but C5 overflow prevents going below ~3.2 uH.
-                                                 With Rs=50mOhm: C1/F1=8192*0.05/(4e-6*25000)=0.5 (stable).
-                                                 C5~25866 fits int16_t (3uH would overflow at ~34488).
-                                                 Closer to true Ls => better current model accuracy under load.) */
+#define RS                      0.100 /* Stator resistance, ohm -- Motor Pilot measured: 0.1 Ohm (2852/3100KV) */
+#define LS                      0.000010 /* Stator inductance, H (10 uH -- Motor Pilot measured 0.01 mH;
+                                                 C1/F1=8192*0.1/(10e-6*25000)=0.33 (stable, < 1).
+                                                 C5 ~= 25866*(4/10) = 10346 -- well within int16_t range.
+                                                 Rs=0.1 Ohm / Ls=10 uH matches Motor Pilot identification.
+                                                 Accurate observer BEMF model at all speeds.) */
 
 /* When using Id = 0, NOMINAL_CURRENT is utilized to saturate the output of the
    PID for speed regulation (i.e. reference torque).
