@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/01_Fixed/mrad_ws_2601_zulu/src/zulu_esc/bag_file/**)",
+      "Read(//c/01_Fixed/mrad_ws_2601_zulu/**)",
+      "Bash(python read_bag3.py \"c:/01_Fixed/mrad_ws_2601_zulu/src/zulu_esc/bag_file/rosbag2_2026_03_12-10_25_38/rosbag2_2026_03_12-10_25_38_0.mcap\")",
+      "Bash(python read_bag3.py \"c:/01_Fixed/mrad_ws_2601_zulu/src/zulu_esc/bag_file/rosbag2_2026_03_12-10_58_55/rosbag2_2026_03_12-10_58_55_0.mcap\")"
+    ]
+  }
+}
