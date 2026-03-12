@@ -50,12 +50,12 @@
 #define F2_LOG                              LOG2((8192))
 
 /* State observer constants */
-#define GAIN1                               -16000  /* Increased: faster BEMF tracking at 1500 RPM weak BEMF under load */
+#define GAIN1                               -9830  /* Stable baseline: -16000 caused observer divergence at 1500 RPM handoff (bogus 30kRPM readings) */
 #define GAIN2                               19648
 
 /* Only in case PLL is used, PLL gains */
-#define PLL_KP_GAIN                         1500  /* Increased: faster angle tracking at low-speed BEMF */
-#define PLL_KI_GAIN                         60  /* Increased: faster angle lock under drivetrain load */
+#define PLL_KP_GAIN                         638  /* Stable baseline: 1500 caused observer divergence at 1500 RPM handoff */
+#define PLL_KI_GAIN                         18  /* Stable baseline: 60 caused observer divergence at 1500 RPM handoff */
 #define PLL_KPDIV                           16384
 #define PLL_KPDIV_LOG                       LOG2((PLL_KPDIV))
 #define PLL_KIDIV                           65535
