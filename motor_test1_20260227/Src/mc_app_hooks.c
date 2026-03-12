@@ -94,11 +94,11 @@ typedef enum
  * Off-ground rosbag: observer stable up to 6.4A open-loop, 4.7A in RUN.
  * 7A raises wheel force to ~11N -- breaks stiction on smooth/low-friction surfaces.
  * NOMINAL_CURRENT_A=10, IQMAX_A=10 in pmsm_motor_parameters.h support this. */
-#define ESC_MAX_IQ_A          7.0f
+#define ESC_MAX_IQ_A          10.0f  /* Raised 7->10A: more torque headroom in RUN to arrest post-SWITCH_OVER deceleration */
 
-/* Torque ramp duration (ms).  Short: torque response should track the
- * joystick quickly; the load sets the actual speed. */
-#define ESC_TORQUE_RAMP_MS    50U
+/* Torque ramp duration (ms).  Near-instant: motor decelerates ~90ms after SWITCH_OVER;
+ * must apply torque much faster than that to arrest the speed drop. */
+#define ESC_TORQUE_RAMP_MS    5U
 
 /* |u| below this threshold is treated as neutral. */
 #define ESC_NEUTRAL_DEADBAND  0.02f
