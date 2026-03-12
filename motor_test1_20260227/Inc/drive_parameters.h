@@ -86,11 +86,11 @@
  * Firmware uses Ls=5µH (model), true motor Ls~1µH.  Kp/Ki scale with Ls:
  * base values at Ls=1µH were Kp=247, Ki=395; ×5 for Ls=5µH model.
  * Refine with Motor Pilot live parameter write after startup is confirmed. */
-#define PID_TORQUE_KP_DEFAULT               1235
-#define PID_TORQUE_KI_DEFAULT               1975
+#define PID_TORQUE_KP_DEFAULT               247  /* Ls=1uH true motor; x5=1235 was wrong (loop saw real Ls, not model) */
+#define PID_TORQUE_KI_DEFAULT               395
 #define PID_TORQUE_KD_DEFAULT               0
-#define PID_FLUX_KP_DEFAULT                 1235
-#define PID_FLUX_KI_DEFAULT                 1975
+#define PID_FLUX_KP_DEFAULT                 247
+#define PID_FLUX_KI_DEFAULT                 395
 #define PID_FLUX_KD_DEFAULT                 0
 
 /* Torque/Flux control loop gains dividers*/
