@@ -81,8 +81,8 @@ typedef enum
 /* Rev-up target speed (RPM): the speed programmed into the speed loop while
  * the motor is still in open-loop START state.  Once the STO observer locks
  * and the motor transitions to RUN, torque mode takes over and this value is
- * no longer used.  Must be >= OBS_MINIMUM_SPEED_RPM (1500). */
-#define ESC_REVUP_SPEED_RPM   1500.0f
+ * no longer used.  Must be >= OBS_MINIMUM_SPEED_RPM (2500). */
+#define ESC_REVUP_SPEED_RPM   2500.0f
 
 /* Speed ramp applied during the rev-up transition (ms). */
 #define ESC_REVUP_RAMP_MS     500U

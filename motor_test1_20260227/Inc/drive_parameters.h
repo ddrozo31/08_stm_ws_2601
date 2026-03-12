@@ -181,7 +181,7 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               1500  /* Handoff at 1500 RPM (matches 903c040 that briefly moved the car) */
+#define OBS_MINIMUM_SPEED_RPM               2500  /* Raised 1500->2500: BEMF=0.625V, more momentum; compensates ~650RPM drop during 100ms SWITCH_OVER */
 #define NB_CONSECUTIVE_TESTS                4 /* corresponding to former
                                                  NB_CONSECUTIVE_TESTS / (TF_REGULATION_RATE / MEDIUM_FREQUENCY_TASK_RATE) */
 #define SPEED_BAND_UPPER_LIMIT              21 /*!< It expresses how much estimated speed can exceed forced stator electrical
@@ -189,7 +189,7 @@
 #define SPEED_BAND_LOWER_LIMIT              11 /*!< It expresses how much estimated speed can be below forced stator electrical
                                                  without being considered wrong. In 1/16 of forced speed */
 
-#define TRANSITION_DURATION                 200 /* Switch over duration, ms â€” increased for angle convergence */
+#define TRANSITION_DURATION                 100 /* Halved 200->100ms: reduces braking-torque window during switch; ~1300RPM/200ms->~650RPM/100ms drop */
 
 /******************************   BUS VOLTAGE Motor 1  **********************/
 #define  M1_VBUS_SAMPLING_TIME              LL_ADC_SAMPLING_CYCLE(47)
