@@ -88,10 +88,13 @@ typedef enum
 #define ESC_REVUP_RAMP_MS     500U
 
 /* Maximum torque current (Amps).  |u|=1.0 maps to this Iq.
- * Drivetrain analysis (3.142kg, 4WD, 3 diffs, ~9:1 ratio, Kt~0.003 N·m/A):
- *   Hard floor (Cr=0.02): ~1.9A needed; carpet/outdoor (Cr=0.05): ~3.4A needed.
- * 3.5A gives headroom for outdoor use without stressing the 2852 motor. */
-#define ESC_MAX_IQ_A          3.5f
+ * Drivetrain analysis (3.142kg, 4WD, 3 diffs, ~10.6:1 ratio, Kt~0.003 N·m/A):
+ *   Stiction break (mu=0.3, smooth floor): ~9.2N -> ~4.8A needed at wheel
+ *   Stiction break (mu=0.5, carpet):      ~15.4N -> ~8.1A (near hw limit)
+ * Off-ground rosbag: observer stable up to 6.4A open-loop, 4.7A in RUN.
+ * 7A raises wheel force to ~11N -- breaks stiction on smooth/low-friction surfaces.
+ * NOMINAL_CURRENT_A=10, IQMAX_A=10 in pmsm_motor_parameters.h support this. */
+#define ESC_MAX_IQ_A          7.0f
 
 /* Torque ramp duration (ms).  Short: torque response should track the
  * joystick quickly; the load sets the actual speed. */
