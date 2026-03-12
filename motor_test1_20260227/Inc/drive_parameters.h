@@ -180,7 +180,7 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               2000  /* Switch-over at 2000 RPM: more BEMF for reliable angle convergence */
+#define OBS_MINIMUM_SPEED_RPM               3500  /* Switch-over at 3500 RPM: BEMF 75% stronger than 2000; motor reaches this in open-loop */
 #define NB_CONSECUTIVE_TESTS                4 /* corresponding to former
                                                  NB_CONSECUTIVE_TESTS / (TF_REGULATION_RATE / MEDIUM_FREQUENCY_TASK_RATE) */
 #define SPEED_BAND_UPPER_LIMIT              21 /*!< It expresses how much estimated speed can exceed forced stator electrical
