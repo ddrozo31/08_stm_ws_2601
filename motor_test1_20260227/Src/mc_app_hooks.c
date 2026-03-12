@@ -359,11 +359,32 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
     /* ---------------------------------------------------------------------- */
     case ESC_FAULT:
       /* FAULT_OVER: the fault condition is gone but not yet acknowledged.
-       * Acknowledge it, then require a neutral command before re-enabling. */
+       * Acknowledge it, then restart immediately if joystick still pushed
+       * (RC-car behaviour: observer loss is transient, retry is correct).
+       * Only fall back to WAIT_NEUTRAL if joystick is at neutral. */
       if (mci_st == FAULT_OVER)
       {
         (void)MC_AcknowledgeFaultMotor1();
-        esc_state = ESC_WAIT_NEUTRAL;
+        if (u > ESC_NEUTRAL_DEADBAND)
+        {
+          if (MC_StartMotor1())
+          {
+            (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+          }
+          esc_state = ESC_FORWARD;
+        }
+        else if (u < -ESC_NEUTRAL_DEADBAND)
+        {
+          if (MC_StartMotor1())
+          {
+            (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+          }
+          esc_state = ESC_REVERSE;
+        }
+        else
+        {
+          esc_state = ESC_WAIT_NEUTRAL;
+        }
       }
       break;
 

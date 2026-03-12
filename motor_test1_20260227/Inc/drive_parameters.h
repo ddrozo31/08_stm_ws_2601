@@ -152,27 +152,27 @@
 /* Phase 1 */
 #define PHASE1_DURATION                     300 /*milliseconds */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              1.8
+#define PHASE1_FINAL_CURRENT_A              3.5
 
 /* Phase 2 */
 #define PHASE2_DURATION                     1200 /*milliseconds */
 #define PHASE2_FINAL_SPEED_UNIT             (500*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              1.8
+#define PHASE2_FINAL_CURRENT_A              3.5
 
 /* Phase 3 */
 #define PHASE3_DURATION                     1200 /*milliseconds */
 #define PHASE3_FINAL_SPEED_UNIT             (1500*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              1.8
+#define PHASE3_FINAL_CURRENT_A              3.5
 
 /* Phase 4 */
 #define PHASE4_DURATION                     1500 /*milliseconds */
 #define PHASE4_FINAL_SPEED_UNIT             (2600*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              1.8
+#define PHASE4_FINAL_CURRENT_A              3.5
 
 /* Phase 5 */
 #define PHASE5_DURATION                     6000 /* milliseconds */
 #define PHASE5_FINAL_SPEED_UNIT             (6500*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              1.8
+#define PHASE5_FINAL_CURRENT_A              3.5
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
