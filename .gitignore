@@ -41,7 +41,6 @@ RemoteSystemsTempFiles/
 # -----------------------------
 # Screenshots / captures (optional: keep if you want)
 # -----------------------------
-*.png
 *.jpg
 *.jpeg
 
