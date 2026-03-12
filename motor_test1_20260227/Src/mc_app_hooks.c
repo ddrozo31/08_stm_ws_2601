@@ -88,10 +88,10 @@ typedef enum
 #define ESC_REVUP_RAMP_MS     500U
 
 /* Maximum torque current (Amps).  |u|=1.0 maps to this Iq.
- * 2.5 A: rosbag analysis confirmed stable operation up to ~1.1A (u=0.75).
- * Raising ceiling so full joystick range produces meaningful thrust.
- * If observer loses lock (WAIT_NEUTRAL without FAULT), reduce back to 2.0A. */
-#define ESC_MAX_IQ_A          2.5f
+ * Drivetrain analysis (3.142kg, 4WD, 3 diffs, ~9:1 ratio, Kt~0.003 N·m/A):
+ *   Hard floor (Cr=0.02): ~1.9A needed; carpet/outdoor (Cr=0.05): ~3.4A needed.
+ * 3.5A gives headroom for outdoor use without stressing the 2852 motor. */
+#define ESC_MAX_IQ_A          3.5f
 
 /* Torque ramp duration (ms).  Short: torque response should track the
  * joystick quickly; the load sets the actual speed. */

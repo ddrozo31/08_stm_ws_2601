@@ -29,14 +29,12 @@
 
 /***************** MOTOR ELECTRICAL PARAMETERS  ******************************/
 #define POLE_PAIR_NUM           2 /* Number of motor pole pairs */
-#define RS                      0.1 /* Stator resistance , ohm*/
-#define LS                      0.000005 /* Stator inductance, H (5 µH — inflated for observer
-                                                 stability; true measured value is ~1 µH but
-                                                 τ=Ls/Rs=10µs < Ts=40µs makes the discrete-time
-                                                 observer unstable at the 25 kHz FOC rate.
-                                                 Using 5 µH gives C1/F1=0.8 (stable) while keeping
-                                                 C5 within int16_t range.  Tune Kp/Ki in Motor Pilot
-                                                 to compensate the detuned current loop.) */
+#define RS                      0.050 /* Stator resistance , ohm -- educated guess 50mOhm typical for 3100KV RC motor */
+#define LS                      0.000004 /* Stator inductance, H (4 uH -- reduced from 5 uH;
+                                                 true value ~1 uH but C5 overflow prevents going below ~3.2 uH.
+                                                 With Rs=50mOhm: C1/F1=8192*0.05/(4e-6*25000)=0.5 (stable).
+                                                 C5~25866 fits int16_t (3uH would overflow at ~34488).
+                                                 Closer to true Ls => better current model accuracy under load.) */
 
 /* When using Id = 0, NOMINAL_CURRENT is utilized to saturate the output of the
    PID for speed regulation (i.e. reference torque).

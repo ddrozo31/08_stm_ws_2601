@@ -38,11 +38,12 @@
 /****** State Observer + PLL ****/
 #define VARIANCE_THRESHOLD                  0.80 /*!< Max tolerance: default proven value */
 
+
 /* State observer scaling factors F1
- * Ls=5µH (firmware model) with F1=8192 gives C1=F1*RS/(LS*TF_RATE)=8192*0.1/(5e-6*25000)=6554
- * and C1/F1=0.8 — the discrete-time observer is stable (requires C1/F1 < 1).
- * C5=F1*Vmax/(LS*Imax*TF_RATE) ≈ 20693 — fits in int16_t.
- * GAIN1 scaled from original -19661 (F1=16384) → -9830 (F1=8192, same effective gain). */
+ * Ls=4uH, Rs=50mOhm: C1=F1*RS/(LS*TF_RATE)=8192*0.05/(4e-6*25000)=4096
+ * and C1/F1=0.5 -- stable (requires C1/F1 < 1). Better current model vs old 5uH/0.1Ohm.
+ * C5 ~= 20693*(5/4) = 25866 -- fits in int16_t (3uH would overflow at ~34488).
+ * GAIN1 scaled from original -19661 (F1=16384) -> -9830 (F1=8192, same effective gain). */
 #define F1                                  8192
 #define F2                                  8192
 #define F1_LOG                              LOG2((8192))
