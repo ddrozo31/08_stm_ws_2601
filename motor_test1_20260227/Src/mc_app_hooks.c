@@ -84,8 +84,11 @@ typedef enum
  * no longer used.  Must be >= OBS_MINIMUM_SPEED_RPM (2500). */
 #define ESC_REVUP_SPEED_RPM   2500.0f
 
-/* Speed ramp applied during the rev-up transition (ms). */
-#define ESC_REVUP_RAMP_MS     500U
+/* Speed ramp applied during the rev-up transition (ms).
+ * Must be slow enough for the drivetrain to follow the rotating field under
+ * ground load.  500ms (5000 RPM/s) caused rotor/field slip → audible grinding.
+ * 3000ms (833 RPM/s) gives the drivetrain time to spin up without slip. */
+#define ESC_REVUP_RAMP_MS     3000U
 
 /* Maximum torque current (Amps).  |u|=1.0 maps to this Iq.
  * Drivetrain analysis (3.142kg, 4WD, 3 diffs, ~10.6:1 ratio, Kt~0.003 N·m/A):
@@ -119,11 +122,16 @@ typedef enum
 
 /* Private state ------------------------------------------------------------ */
 
-static ESC_State_t esc_state         = ESC_BOOT;
-static uint16_t    esc_timeout_ctr   = 0U;
-static uint16_t    esc_telemetry_ctr = 0U;
-static MCI_State_t esc_prev_mci_st   = IDLE;  /* Previous MCSDK state — detects RUN entry */
-static uint16_t    esc_boost_ctr     = 0U;    /* Counts down boost period; 0 = boost inactive */
+static ESC_State_t esc_state           = ESC_BOOT;
+static uint16_t    esc_timeout_ctr     = 0U;
+static uint16_t    esc_telemetry_ctr   = 0U;
+static MCI_State_t esc_prev_mci_st     = IDLE;  /* Previous MCSDK state — detects RUN entry */
+static uint16_t    esc_boost_ctr       = 0U;    /* Counts down boost period; 0 = boost inactive */
+static uint16_t    esc_restart_delay   = 0U;    /* Counts down inter-restart back-off (ms) */
+
+/* Minimum delay between successive auto-restarts after observer loss (ms).
+ * Prevents the rapid-retry grinding loop when rev-up fails repeatedly. */
+#define ESC_RESTART_DELAY_MS  500U
 
 /* -------------------------------------------------------------------------- */
 
@@ -263,10 +271,11 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         else
         {
           /* Observer locked at correct angle: torque mode.
-           * Apply full boost on RUN entry to break drivetrain stiction,
-           * then proportional torque from the joystick. */
+           * Apply boost on RUN entry clamped to joystick command — prevents
+           * overspeed if stick is near neutral when observer locks. */
           if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
-          float fwd_iq = (esc_boost_ctr > 0U) ? ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A);
+          float boost_fwd = fminf(ESC_BOOST_IQ_A, u * ESC_MAX_IQ_A);
+          float fwd_iq = (esc_boost_ctr > 0U) ? boost_fwd : (u * ESC_MAX_IQ_A);
           if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
           (void)MC_ProgramTorqueRampMotor1_F(fwd_iq, ESC_TORQUE_RAMP_MS);
         }
@@ -274,13 +283,18 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       else if (mci_st == IDLE)
       {
         /* Motor exited to IDLE while joystick is still commanding forward
-         * (observer failed or direction-check rejected).  Auto-restart so
-         * the car keeps moving without requiring the user to re-push. */
-        if (new_cmd != 0U)
+         * (observer failed or direction-check rejected).  Auto-restart after
+         * a short back-off so the rapid-retry grinding loop is broken. */
+        if (esc_restart_delay > 0U)
+        {
+          esc_restart_delay--;
+        }
+        else if (new_cmd != 0U)
         {
           if (MC_StartMotor1())
           {
             (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            esc_restart_delay = ESC_RESTART_DELAY_MS;
           }
         }
       }
@@ -355,21 +369,27 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           /* Observer locked at correct angle: torque mode.
            * u is negative — negative Iq — reverse torque.
-           * Apply full boost on RUN entry (negative) to break stiction. */
+           * Boost clamped to joystick command (u negative → fmaxf clamps). */
           if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
-          float rev_iq = (esc_boost_ctr > 0U) ? -ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A);
+          float boost_rev = fmaxf(-ESC_BOOST_IQ_A, u * ESC_MAX_IQ_A);
+          float rev_iq = (esc_boost_ctr > 0U) ? boost_rev : (u * ESC_MAX_IQ_A);
           if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
           (void)MC_ProgramTorqueRampMotor1_F(rev_iq, ESC_TORQUE_RAMP_MS);
         }
       }
       else if (mci_st == IDLE)
       {
-        /* Same as FORWARD: auto-restart in reverse if joystick still pushed. */
-        if (new_cmd != 0U)
+        /* Same as FORWARD: auto-restart in reverse after back-off delay. */
+        if (esc_restart_delay > 0U)
+        {
+          esc_restart_delay--;
+        }
+        else if (new_cmd != 0U)
         {
           if (MC_StartMotor1())
           {
             (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            esc_restart_delay = ESC_RESTART_DELAY_MS;
           }
         }
       }
