@@ -278,6 +278,7 @@ This is the low-level FOC state machine inside the ST Motor Control SDK.
 | 0 | `IDLE` | Motor stopped. Ready to start. |
 | 4 | `START` | Open-loop rev-up in progress (~7 s). |
 | 6 | `RUN` | Closed-loop FOC active. Torque mode engaged. |
+| 8 | `ANY_STOP` | Motor stopping after speed-band violation or commanded stop. Transient; resolves to `IDLE`. |
 | 10 | `FAULT_NOW` | Active hardware fault. |
 | 11 | `FAULT_OVER` | Fault condition gone; ESC auto-acknowledges. |
 | 19 | `SWITCH_OVER` | 100 ms transition from open-loop to closed-loop. |
@@ -358,7 +359,13 @@ time.sleep(0.1)     # give the ESC one telemetry cycle to confirm READY
 
 Faults are self-clearing: the ESC auto-acknowledges `FAULT_OVER` and transitions back. The host does not need to send a special reset frame.
 
-However after a fault the ESC goes to `WAIT_NEUTRAL` (if joystick is neutral) — so the host must send `u = 0.0` again before driving.
+Post-fault behaviour depends on joystick position at the moment the fault clears:
+
+| Joystick at fault-clear | ESC behaviour |
+|------------------------|---------------|
+| Still pushed (forward) | Auto-restarts rev-up → `FORWARD`. No neutral needed. |
+| Still pushed (reverse) | Auto-restarts rev-up → `REVERSE`. No neutral needed. |
+| At neutral | Goes to `WAIT_NEUTRAL`. Host must send `u = 0.0` to unlock. |
 
 **Recommended host logic:**
 ```python

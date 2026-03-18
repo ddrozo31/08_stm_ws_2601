@@ -110,11 +110,20 @@ typedef enum
 /* Send one telemetry frame every N hook calls (~10 Hz at 1 kHz task rate). */
 #define ESC_TELEMETRY_EVERY   100U
 
+/* Entry-boost torque: immediately after the STO observer locks (MCSDK enters
+ * RUN) apply ESC_BOOST_IQ_A for ESC_BOOST_DURATION_MS to break drivetrain
+ * stiction while the motor is still near rev-up speed (~2500 RPM).
+ * After the boost period the command falls back to u * ESC_MAX_IQ_A. */
+#define ESC_BOOST_IQ_A        12.0f   /* Boost current at RUN entry (A) */
+#define ESC_BOOST_DURATION_MS 300U    /* Duration of boost (ms = hook cycles) */
+
 /* Private state ------------------------------------------------------------ */
 
 static ESC_State_t esc_state         = ESC_BOOT;
 static uint16_t    esc_timeout_ctr   = 0U;
 static uint16_t    esc_telemetry_ctr = 0U;
+static MCI_State_t esc_prev_mci_st   = IDLE;  /* Previous MCSDK state — detects RUN entry */
+static uint16_t    esc_boost_ctr     = 0U;    /* Counts down boost period; 0 = boost inactive */
 
 /* -------------------------------------------------------------------------- */
 
@@ -254,8 +263,12 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         else
         {
           /* Observer locked at correct angle: torque mode.
-           * Joystick maps directly to Iq -- speed is set by the load. */
-          (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
+           * Apply full boost on RUN entry to break drivetrain stiction,
+           * then proportional torque from the joystick. */
+          if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
+          float fwd_iq = (esc_boost_ctr > 0U) ? ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A);
+          if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
+          (void)MC_ProgramTorqueRampMotor1_F(fwd_iq, ESC_TORQUE_RAMP_MS);
         }
       }
       else if (mci_st == IDLE)
@@ -341,8 +354,12 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         else
         {
           /* Observer locked at correct angle: torque mode.
-           * u is negative here -- negative Iq -- reverse torque. */
-          (void)MC_ProgramTorqueRampMotor1_F(u * ESC_MAX_IQ_A, ESC_TORQUE_RAMP_MS);
+           * u is negative — negative Iq — reverse torque.
+           * Apply full boost on RUN entry (negative) to break stiction. */
+          if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
+          float rev_iq = (esc_boost_ctr > 0U) ? -ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A);
+          if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
+          (void)MC_ProgramTorqueRampMotor1_F(rev_iq, ESC_TORQUE_RAMP_MS);
         }
       }
       else if (mci_st == IDLE)
@@ -396,6 +413,9 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       esc_state = ESC_WAIT_NEUTRAL;
       break;
   }
+
+  /* Track previous MCSDK state for RUN-entry boost detection. */
+  esc_prev_mci_st = mci_st;
 
   /* ---- Telemetry ---------------------------------------------------------- */
 
