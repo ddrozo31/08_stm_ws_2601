@@ -271,11 +271,14 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         else
         {
           /* Observer locked at correct angle: torque mode.
-           * Apply boost on RUN entry clamped to joystick command — prevents
-           * overspeed if stick is near neutral when observer locks. */
+           * Boost on RUN entry: full ESC_BOOST_IQ_A when stick is meaningfully
+           * pushed (u > 0.10), otherwise scale with stick.
+           * This prevents the u=0 → runaway case while still delivering full
+           * 12 A stiction-break torque at normal operating throttle. */
           if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
-          float boost_fwd = fminf(ESC_BOOST_IQ_A, u * ESC_MAX_IQ_A);
-          float fwd_iq = (esc_boost_ctr > 0U) ? boost_fwd : (u * ESC_MAX_IQ_A);
+          float fwd_iq = (esc_boost_ctr > 0U)
+                         ? ((u > 0.10f) ? ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A))
+                         : (u * ESC_MAX_IQ_A);
           if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
           (void)MC_ProgramTorqueRampMotor1_F(fwd_iq, ESC_TORQUE_RAMP_MS);
         }
@@ -369,10 +372,12 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           /* Observer locked at correct angle: torque mode.
            * u is negative — negative Iq — reverse torque.
-           * Boost clamped to joystick command (u negative → fmaxf clamps). */
+           * Same threshold logic as FORWARD: full boost when stick meaningfully
+           * pushed (u < -0.10), scale with stick otherwise. */
           if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
-          float boost_rev = fmaxf(-ESC_BOOST_IQ_A, u * ESC_MAX_IQ_A);
-          float rev_iq = (esc_boost_ctr > 0U) ? boost_rev : (u * ESC_MAX_IQ_A);
+          float rev_iq = (esc_boost_ctr > 0U)
+                         ? ((u < -0.10f) ? -ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A))
+                         : (u * ESC_MAX_IQ_A);
           if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
           (void)MC_ProgramTorqueRampMotor1_F(rev_iq, ESC_TORQUE_RAMP_MS);
         }
