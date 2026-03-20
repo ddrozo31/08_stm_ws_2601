@@ -256,7 +256,12 @@ This is what the **host sees** in the `esc_state` telemetry byte. It describes t
                    REVERSE              FORWARD
 
             ──── Any MCSDK fault ────▶ FAULT (6)
-            ◀─── FAULT_OVER + ack ────
+                                            │
+                                     FAULT_OVER + ack
+                                       /    |    \
+                               u>0.02  |  neutral  | u<-0.02
+                                  ▼         ▼         ▼
+                              FORWARD  WAIT_NEUTRAL  REVERSE
 ```
 
 | State | `esc_state` byte | Meaning |
@@ -267,7 +272,7 @@ This is what the **host sees** in the `esc_state` telemetry byte. It describes t
 | `FORWARD` | 3 | Motor spinning forward. Torque = `u × 12 A`. |
 | `BRAKE` | 4 | Motor coasting to stop. Triggered by direction reversal. |
 | `REVERSE` | 5 | Motor spinning reverse. Torque = `u × 12 A` (u is negative). |
-| `FAULT` | 6 | MCSDK hardware fault. Motor stopped. Clears automatically on `FAULT_OVER`. |
+| `FAULT` | 6 | MCSDK hardware fault. Motor stopped. On `FAULT_OVER`: auto-restarts into `FORWARD`/`REVERSE` if joystick is pushed; otherwise transitions to `WAIT_NEUTRAL`. |
 
 ### 4.2 MCSDK Internal State (`mcsdk_state` byte)
 
@@ -297,7 +302,7 @@ Host sends u > 0.02
         ▼ (ESC: READY → FORWARD)
 MCSDK: IDLE → ICLWAIT → OFFSET_CALIB → ALIGNMENT → START
         │
-        │   ~7 seconds of open-loop rev-up
+        │   ~7.7 seconds of open-loop rev-up
         │   (motor hums and accelerates to 2500 RPM target)
         │
         ▼ (MCSDK_STATE = 19: SWITCH_OVER)
@@ -306,12 +311,15 @@ STO observer locks onto back-EMF signal
         │
         ▼ (MCSDK_STATE = 6: RUN)
 ESC activates torque mode:
-  Iq = u × 12 A  (programmed every ~1 ms)
+  Boost phase (300 ms): Iq = 12 A if |u| > 0.10, else u × 12 A
+  After boost:          Iq = u × 12 A  (programmed every ~1 ms)
 Motor speed now determined by load, not a fixed target.
 ```
 
 > **Key rule:** The motor **will not** respond to throttle changes during `START` (MCSDK state 4).
 > Only after `RUN` (MCSDK state 6) does `u` directly command torque.
+>
+> **RUN-entry boost:** For the first 300 ms after the observer locks, the ESC applies full 12 A if your stick is pushed beyond 10% (`|u| > 0.10`), regardless of the exact `u` value. This breaks drivetrain stiction while the motor is still near rev-up speed. After 300 ms it reverts to the normal `u × 12 A` mapping.
 
 ### 5.2 Minimum operating speed
 
@@ -330,7 +338,17 @@ You cannot reverse direction instantaneously. The sequence is:
 4. ESC starts rev-up in the new direction → `REVERSE` state.
 5. ~7 s later, closed-loop torque mode resumes.
 
-**Total reversal time: approximately 7–15 seconds** depending on motor deceleration and rev-up duration.
+**Total reversal time: approximately 7.7–15 seconds** depending on motor deceleration and rev-up duration.
+
+### 5.4 Observer failure during RUN — auto-restart
+
+If the STO observer loses lock mid-run (speed drops outside the valid band), MCSDK stops the motor and returns to `IDLE` **without** raising a fault. The ESC detects this and auto-restarts after a 500 ms back-off, still in `FORWARD` or `REVERSE` — no host action required. From the host's perspective `esc_state` stays `FORWARD`/`REVERSE` throughout; you will briefly see `mcsdk_state` = `IDLE` then `START` again.
+
+If this keeps repeating (stick held, motor grinding on every restart), the root cause is usually an unsuitable surface or load condition.
+
+### 5.5 Wrong-angle observer lock — silent retry
+
+The STO observer can occasionally converge to the 180° wrong-angle solution, making the motor spin backward despite a forward command. The ESC detects this (estimated speed sign disagrees with commanded direction at more than 50 RPM) and stops cleanly to `READY` without entering `FAULT`. From the host's perspective you will see `esc_state` → `READY` without any fault byte. Simply re-send the drive command to retry.
 
 ---
 
@@ -363,9 +381,9 @@ Post-fault behaviour depends on joystick position at the moment the fault clears
 
 | Joystick at fault-clear | ESC behaviour |
 |------------------------|---------------|
-| Still pushed (forward) | Auto-restarts rev-up → `FORWARD`. No neutral needed. |
-| Still pushed (reverse) | Auto-restarts rev-up → `REVERSE`. No neutral needed. |
-| At neutral | Goes to `WAIT_NEUTRAL`. Host must send `u = 0.0` to unlock. |
+| Still pushed forward (`u > 0.02`) | Auto-acknowledges, restarts rev-up → `FORWARD`. No neutral needed. |
+| Still pushed reverse (`u < -0.02`) | Auto-acknowledges, restarts rev-up → `REVERSE`. No neutral needed. |
+| At neutral | Auto-acknowledges → `WAIT_NEUTRAL`. Host must send `u = 0.0` to unlock. |
 
 **Recommended host logic:**
 ```python
@@ -384,8 +402,9 @@ if telemetry['esc_state'] == 'WAIT_NEUTRAL':
 | t=0 (boot) | WAIT_NEUTRAL | IDLE | 0 | 0 |
 | t=0.1 (after neutral) | READY | IDLE | 0 | 0 |
 | t=0.2 (after u=0.7) | FORWARD | START | 0→500 | ~2000 |
-| t=7 (rev-up peak) | FORWARD | SWITCH_OVER | ~2100 | ~3000 |
-| t=7.1 (locked) | FORWARD | RUN | ~2500 | ~8400 (0.7×12A) |
+| t=7.7 (rev-up peak) | FORWARD | SWITCH_OVER | ~2100 | ~3000 |
+| t=7.8 (locked, boost) | FORWARD | RUN | ~2500 | ~12000 (boost) |
+| t=8.1 (boost done) | FORWARD | RUN | ~2500+ | ~8400 (0.7×12A) |
 
 ### 7.2 Fault byte decoding (MCSDK bitmask, lower byte)
 
@@ -412,7 +431,7 @@ These limits are hardware-verified on smooth hard floor (2026-03-12):
 |-----------|-------|-------|
 | Min closed-loop speed | ±2500 RPM | Below this: observer cannot maintain lock |
 | Max Iq command | 12 A | `|u|=1.0` maps to 12 A |
-| Rev-up duration | ~7 s | Must hold throttle through the full open-loop phase |
+| Rev-up duration | ~7.7 s | Must hold throttle through the full open-loop phase |
 | SWITCH_OVER speed dip | 400–600 RPM | Normal during observer handoff |
 | Communication timeout | 500 ms | Motor stops if no command received |
 | Telemetry rate | ~10 Hz | One 15-byte frame every 100 ms |
@@ -426,7 +445,7 @@ To successfully control the ESC your host code must:
 - [ ] Open serial port at **1843200 baud, 8N1**, no flow control.
 - [ ] On startup, **send `u = 0.0`** to pass the WAIT_NEUTRAL gate.
 - [ ] Send command frames at **10–50 Hz** continuously while driving.
-- [ ] **Hold throttle** through the full ~7 s rev-up (do not drop to neutral during START).
+- [ ] **Hold throttle** through the full ~7.7 s rev-up (do not drop to neutral during START).
 - [ ] Parse telemetry frames (SOF = `0xBB`, 15 bytes, XOR checksum on bytes 1–13).
 - [ ] Monitor `esc_state` — react to `WAIT_NEUTRAL` by re-sending neutral.
 - [ ] Monitor `faults` byte — log or surface any non-zero value.
