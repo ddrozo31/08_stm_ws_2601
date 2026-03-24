@@ -151,14 +151,14 @@
 /******************************   START-UP PARAMETERS   **********************/
 
 /* Phase 1 */
-#define PHASE1_DURATION                     1200 /*milliseconds -- longer alignment for stall-start */
+#define PHASE1_DURATION                     1500 /*milliseconds -- extended 1200->1500ms for HOSIM drivetrain alignment */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              4.0
+#define PHASE1_FINAL_CURRENT_A              8.0  /* HOSIM: raised 4->8A — drivetrain stiction requires strong alignment lock */
 
 /* Phase 2 */
 #define PHASE2_DURATION                     1200 /*milliseconds */
 #define PHASE2_FINAL_SPEED_UNIT             (500*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              6.0  /* Raised 4->6A: more torque to push mechanical speed up under drivetrain load */
+#define PHASE2_FINAL_CURRENT_A              8.0  /* HOSIM: raised 6->8A — needs more torque to break stiction and accelerate drivetrain */
 
 /* Phase 3 */
 #define PHASE3_DURATION                     1500 /* ms -- extended 1200->1500ms; target lowered 1500->1000 RPM.
@@ -166,21 +166,21 @@
                                                     rotor to follow under drivetrain load -> audible grinding.
                                                     Now 333 RPM/s (500->1000 in 1500ms). */
 #define PHASE3_FINAL_SPEED_UNIT             (1000*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              6.0  /* HOSIM: raised 5->6A — heavier drivetrain stiction requires more torque to follow field */
+#define PHASE3_FINAL_CURRENT_A              8.0  /* HOSIM: raised 6->8A */
 
 /* Phase 4 */
-#define PHASE4_DURATION                     1800 /* ms -- extended 1500->1800ms; target lowered 2600->2000 RPM.
-                                                    556 RPM/s (1000->2000 in 1800ms) vs previous 733 RPM/s. */
-#define PHASE4_FINAL_SPEED_UNIT             (2000*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              6.0  /* HOSIM: raised 5->6A */
+#define PHASE4_DURATION                     2500 /* ms -- HOSIM: extended 1800->2500ms; target lowered 2000->1800 RPM.
+                                                    320 RPM/s (1000->1800 in 2500ms) vs 556 RPM/s — slower ramp so
+                                                    rotor can follow field under heavy HOSIM drivetrain load. */
+#define PHASE4_FINAL_SPEED_UNIT             (1800*SPEED_UNIT/U_RPM)
+#define PHASE4_FINAL_CURRENT_A              10.0 /* HOSIM: raised 8->10A — more torque margin at high speed */
 
 /* Phase 5 */
-#define PHASE5_DURATION                     2000 /* milliseconds -- target lowered 6500->2800 RPM (previous change).
-                                                    At 6500 RPM electrical, drivetrain load limits mechanical to ~2000 RPM,
-                                                    ratio 0.31 violates SPEED_BAND_LOWER_LIMIT (0.3125) -> MCSDK_8 (ANY_STOP).
-                                                    Capping at 2800 RPM keeps mech/elec ratio above threshold; lets observer lock on. */
-#define PHASE5_FINAL_SPEED_UNIT             (2800*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              6.0  /* HOSIM: raised 5->6A — restored to original Zulu value; HOSIM needs higher current */
+#define PHASE5_DURATION                     3000 /* ms -- HOSIM: extended 2000->3000ms.
+                                                    300 RPM/s (1800->2700 in 3000ms) vs 400 RPM/s.
+                                                    Target lowered 2800->2700 RPM for safety margin. */
+#define PHASE5_FINAL_SPEED_UNIT             (2700*SPEED_UNIT/U_RPM)
+#define PHASE5_FINAL_CURRENT_A              10.0 /* HOSIM: raised 8->10A */
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
