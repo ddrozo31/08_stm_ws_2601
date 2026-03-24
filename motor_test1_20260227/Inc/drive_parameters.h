@@ -166,13 +166,13 @@
                                                     rotor to follow under drivetrain load -> audible grinding.
                                                     Now 333 RPM/s (500->1000 in 1500ms). */
 #define PHASE3_FINAL_SPEED_UNIT             (1000*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              5.0  /* Drivetrain rolling by phase 3; 5A sufficient, less violent field */
+#define PHASE3_FINAL_CURRENT_A              6.0  /* HOSIM: raised 5->6A — heavier drivetrain stiction requires more torque to follow field */
 
 /* Phase 4 */
 #define PHASE4_DURATION                     1800 /* ms -- extended 1500->1800ms; target lowered 2600->2000 RPM.
                                                     556 RPM/s (1000->2000 in 1800ms) vs previous 733 RPM/s. */
 #define PHASE4_FINAL_SPEED_UNIT             (2000*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              5.0
+#define PHASE4_FINAL_CURRENT_A              6.0  /* HOSIM: raised 5->6A */
 
 /* Phase 5 */
 #define PHASE5_DURATION                     2000 /* milliseconds -- target lowered 6500->2800 RPM (previous change).
@@ -180,7 +180,7 @@
                                                     ratio 0.31 violates SPEED_BAND_LOWER_LIMIT (0.3125) -> MCSDK_8 (ANY_STOP).
                                                     Capping at 2800 RPM keeps mech/elec ratio above threshold; lets observer lock on. */
 #define PHASE5_FINAL_SPEED_UNIT             (2800*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              5.0  /* Reduced 6->5A: drivetrain at speed, high current causes violent cogging */
+#define PHASE5_FINAL_CURRENT_A              6.0  /* HOSIM: raised 5->6A — restored to original Zulu value; HOSIM needs higher current */
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
