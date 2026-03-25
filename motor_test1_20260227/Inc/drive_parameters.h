@@ -169,18 +169,20 @@
 #define PHASE3_FINAL_CURRENT_A              8.0  /* HOSIM: raised 6->8A */
 
 /* Phase 4 */
-#define PHASE4_DURATION                     2500 /* ms -- HOSIM: extended 1800->2500ms; target lowered 2000->1800 RPM.
-                                                    320 RPM/s (1000->1800 in 2500ms) vs 556 RPM/s — slower ramp so
-                                                    rotor can follow field under heavy HOSIM drivetrain load. */
-#define PHASE4_FINAL_SPEED_UNIT             (1800*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              10.0 /* HOSIM: raised 8->10A — more torque margin at high speed */
+#define PHASE4_DURATION                     2500 /* ms -- HOSIM: target lowered 1800->1600 RPM.
+                                                    240 RPM/s (1000->1600 in 2500ms) — motor stays well below current limit,
+                                                    preventing step-loss at the phase 4/5 boundary. */
+#define PHASE4_FINAL_SPEED_UNIT             (1600*SPEED_UNIT/U_RPM)
+#define PHASE4_FINAL_CURRENT_A              10.0
 
 /* Phase 5 */
-#define PHASE5_DURATION                     3000 /* ms -- HOSIM: extended 2000->3000ms.
-                                                    300 RPM/s (1800->2700 in 3000ms) vs 400 RPM/s.
-                                                    Target lowered 2800->2700 RPM for safety margin. */
-#define PHASE5_FINAL_SPEED_UNIT             (2700*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              10.0 /* HOSIM: raised 8->10A */
+#define PHASE5_DURATION                     4000 /* ms -- HOSIM: step-DOWN current 12->6A.
+                                                    Phase 4 (10A) does the heavy lifting to 1600 RPM.
+                                                    Phase 5 holds at 6A to improve observer SNR at SWITCH_OVER:
+                                                    at 1700 RPM: BEMF=0.425V, Rs*I=0.6V, SNR=0.71 (vs 0.42 at 12A/2000RPM).
+                                                    167 RPM/s (1600->1700 RPM over 4000ms) — very gentle, motor holds speed. */
+#define PHASE5_FINAL_SPEED_UNIT             (1700*SPEED_UNIT/U_RPM)
+#define PHASE5_FINAL_CURRENT_A              6.0  /* HOSIM: stepped DOWN 12->6A — reduce Rs*I dominance for observer lock */
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
@@ -188,15 +190,19 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               2500  /* Raised 1500->2500: BEMF=0.625V, more momentum; compensates ~650RPM drop during 100ms SWITCH_OVER */
-#define NB_CONSECUTIVE_TESTS                4 /* corresponding to former
-                                                 NB_CONSECUTIVE_TESTS / (TF_REGULATION_RATE / MEDIUM_FREQUENCY_TASK_RATE) */
+#define OBS_MINIMUM_SPEED_RPM               1700  /* HOSIM: lowered 2000->1700; phase 5 stepped down to 6A to improve observer SNR.
+                                                    BEMF=0.425V at 1700RPM; SNR=0.71 (vs 0.42 at 12A/2000RPM).
+                                                    Must match ESC_REVUP_SPEED_RPM in mc_app_hooks.c */
+#define NB_CONSECUTIVE_TESTS                12 /* HOSIM: raised 4->12 — observer must report valid speed for 12 consecutive ms
+                                                  before SWITCH_OVER fires; filters transient 180° wrong-angle solutions
+                                                  that triggered at 2000 RPM with high Rs*I / low BEMF ratio */
 #define SPEED_BAND_UPPER_LIMIT              21 /*!< It expresses how much estimated speed can exceed forced stator electrical
                                                  without being considered wrong. In 1/16 of forced speed */
 #define SPEED_BAND_LOWER_LIMIT              11 /*!< It expresses how much estimated speed can be below forced stator electrical
                                                  without being considered wrong. In 1/16 of forced speed */
 
-#define TRANSITION_DURATION                 100 /* Halved 200->100ms: reduces braking-torque window during switch; ~1300RPM/200ms->~650RPM/100ms drop */
+#define TRANSITION_DURATION                 50  /* HOSIM: halved 100->50ms — reduces speed drop during blend from ~650 to ~325 RPM;
+                                                   post-SWITCH_OVER speed ~1675 RPM (vs ~1350 RPM at 100ms), keeps BEMF above observer floor */
 
 /******************************   BUS VOLTAGE Motor 1  **********************/
 #define  M1_VBUS_SAMPLING_TIME              LL_ADC_SAMPLING_CYCLE(47)
