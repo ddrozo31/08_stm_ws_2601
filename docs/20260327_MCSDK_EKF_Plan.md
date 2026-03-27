@@ -75,7 +75,7 @@ These are required inputs for the EKF model. Current values from Motor Pilot mea
 | Stator resistance | Rs | 0.100 Ω | Motor Pilot |
 | Stator inductance | Ls | 10.0 μH | Motor Pilot |
 | Back-EMF constant | Ke | 0.25 V/kRPM (mech) | derived |
-| PM flux linkage | Ψf | Ke / (p × 2π/60) | ~0.00076 V·s/rad |
+| PM flux linkage | Ψf | Ke / (p × 2π/60) | 9.75×10⁻⁴ V·s/rad |
 | Pole pairs | p | 2 | motor spec |
 | PWM / FOC rate | Ts_foc | 40 μs (25 kHz) | drive_parameters.h |
 | Speed loop rate | Ts_spd | 1 ms (1 kHz) | drive_parameters.h |
@@ -235,26 +235,29 @@ STM32G431 facts:
 - FOC ISR: 25 kHz → 6,800 cycles per period (tight for a matrix EKF)
 - Speed loop: 1 kHz → 170,000 cycles per period (very comfortable)
 
-**Decision:** Run the EKF at the **speed loop rate (1 kHz)**, not the FOC rate.
+**Decision:** Run the EKF at the **FOC rate (25 kHz / Ts=40 μs)**.
 
-At 1 kHz the EKF computes a new angle estimate every 1 ms. The FOC ISR interpolates the
-angle between EKF updates using the last estimated ω (same approach MCSDK uses with its
-internal PLL). This is standard practice in embedded sensorless PMSM.
+**Why not 1 kHz?** Euler discretisation of the current states requires Ts·Rs/Ls < 2.
+With Ts=1 ms: a₁ = 1 − 0.001×0.1/10e-6 = **−9** — unconditionally unstable (NaN after
+one step). ZOH discretisation gives a₁≈4.5×10⁻⁵, b≈10, which amplifies P cross-terms by
+100× per step — also diverges. The correct fix is Ts=40 μs: a₁=0.6 (stable Euler).
 
-**4-state float32 EKF at 1 kHz on G431:**
-- State predict: ~30 multiply-adds
-- Jacobian: ~16 elements, ~50 operations
-- P predict: Fᵀ×P×F + Q: ~64+16 = ~80 multiply-adds
-- K = P×Hᵀ×(H×P×Hᵀ+R)⁻¹: 2×2 matrix inverse (trivial for diagonal R)
-- State update + P update: ~40 operations
-- Total: ~250 float ops → ~500 cycles at 1 instruction/cycle → **0.3% CPU at 1 kHz**
+**4-state float32 EKF at 25 kHz on G431:**
+- 280 float ops per EKF_Update call (counted in `tests/ekf_opcount.py`)
+- ~452 cycles at 25 kHz → **~7.2% of the 6800-cycle FOC budget** — feasible
+- At 1 kHz equivalent view: margin of 4548 cycles vs 5000-cycle target
+
+Additionally: the BEMF predict step must use **exact cosine rotation** (not Euler).
+Euler BEMF grows ||BEMF||² by (1+(ωTs)²) per step → magnitude drift e^11.2 ≈ 74000×
+over 5 s at 1600 RPM → NaN. Exact rotation: ea_p = cos(ωTs)·ea − sin(ωTs)·eb preserves
+magnitude exactly; Jacobian has corresponding exact-rotation derivatives (see §7).
 
 Actions:
-1. Benchmark with a DWT cycle counter around EKF update in a test build.
-2. Confirm float32 angle precision is sufficient (int16 angle = 65536 counts/2π rev →
-   LSB = 0.0055°; float32 has 7 decimal digits → more than adequate).
+1. Benchmark with DWT cycle counter around EKF_Update (harness: `tests/ekf_timing_bench.c`).
+2. Confirm float32 angle precision sufficient (int16 LSB = 0.0055°; float32 ≫ adequate).
 
-**Deliverable:** DWT timing measurement (target < 5000 cycles at 1 kHz).
+**Delivered:** `tests/ekf_opcount.py` (op count), `tests/ekf_timing_bench.c` (DWT harness).
+Measured: 280 ops, 452 cycles, 7.2% FOC CPU, margin 549 cycles vs 5000-cycle target.
 
 ---
 
@@ -269,22 +272,29 @@ motor_test1_20260227/
   Src/esc_ekf_observer.c    — EKF implementation
 ```
 
-Public API:
+Public API (actual implementation — see `Inc/esc_ekf_observer.h`):
 ```c
 typedef struct {
-    float x[4];       // state: [ia, ib, ea, eb]
-    float P[4][4];    // covariance
-    float Q[4][4];    // process noise
-    float R[2][2];    // measurement noise
+    float x[4];       // state: [iα, iβ, eα, eβ]
+    float P[10];      // covariance upper triangle (P00 P01 P02 P03 P11 P12 P13 P22 P23 P33)
     float Rs, Ls, psi_f, Ts;
+    uint8_t p;        // pole pair count
+    /* precomputed: _a1, _b, _inv_psi, _inv_psi2, _rpm_scale, _Q[4], _R */
 } EKF_Handle_t;
 
-void  EKF_Init(EKF_Handle_t *h, float Rs, float Ls, float psi_f, float Ts,
-               float q_i, float q_e, float r_i);
-void  EKF_Update(EKF_Handle_t *h, float Va, float Vb, float ia_meas, float ib_meas);
-float EKF_GetAngle(const EKF_Handle_t *h);      // electrical angle, radians
-float EKF_GetSpeedRPM(const EKF_Handle_t *h);   // mechanical RPM
+void    EKF_Init(EKF_Handle_t *h, float Rs, float Ls, float psi_f, uint8_t p, float Ts,
+                 float q_i, float q_e, float r_i);
+void    EKF_Update(EKF_Handle_t *h, float Va, float Vb, float ia_m, float ib_m);
+float   EKF_GetAngle(const EKF_Handle_t *h);        // electrical angle [rad], range [−π,π]
+float   EKF_GetSpeedRPM(const EKF_Handle_t *h);     // mechanical RPM
+int16_t EKF_GetAngleMCSdk(const EKF_Handle_t *h);   // MCSDK int16 hElAngle format
 ```
+
+Design choices vs. plan:
+- P stored as upper triangle (10 floats) instead of 4×4 — halves write pressure
+- F sparsity exploited in P_pred: ~108 ops instead of naive 192 for F×P×Fᵀ
+- BEMF predict: exact rotation (not Euler) — see §7
+- Diagonal P clamped to Q minimum after each update (PX4/ArduPilot practice)
 
 Compile-time switch in `drive_parameters.h`:
 ```c
@@ -475,7 +485,22 @@ F = ∂f/∂x =
 [     0          0         ...             ...  ]
 ```
 
-BEMF row detail (using ω = (eα²+eβ²)^(1/2) / Ψf):
+**Exact-rotation BEMF predict** (implemented; Euler form below for reference):
+
+```
+ea_p = cos(ω·Ts)·eα − sin(ω·Ts)·eβ
+eb_p = sin(ω·Ts)·eα + cos(ω·Ts)·eβ
+
+Let c = cos(ω·Ts), s = sin(ω·Ts), d = Ts / (Ψf² · ω)
+
+Exact-rotation Jacobian BEMF rows:
+  F[2,2] = c − d·eα·eb_p      F[2,3] = −s − d·eβ·eb_p
+  F[3,2] = s + d·eα·ea_p      F[3,3] =  c + d·eβ·ea_p
+
+Reduces to Euler Jacobian (below) when ω·Ts → 0, ea_p≈eα, eb_p≈eβ.
+```
+
+Euler Jacobian BEMF rows (for reference only — NOT used, Euler BEMF drifts):
 
 ```
 ∂eα_next/∂eα = 1 - Ts·(∂ω/∂eα)·eβ = 1 - Ts·eα·eβ / (Ψf²·ω)
