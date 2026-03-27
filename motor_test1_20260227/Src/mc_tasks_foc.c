@@ -36,12 +36,29 @@
 #include "mc_app_hooks.h"
 
 /* USER CODE BEGIN Includes */
-
+#if USE_EKF_OBSERVER
+#include "esc_ekf_observer.h"   /* EKF_Handle_t, EKF_Update, EKF_GetAngleMCSdk */
+#endif
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN Private define */
 /* Private define ------------------------------------------------------------*/
-
+#if USE_EKF_OBSERVER
+/* MCSDK int16 → SI unit conversion factors (compile-time constants).
+ *
+ * Current: ia_A = ia_int16 × CURRENT_CONV_FACTOR_INV
+ *   where CURRENT_CONV_FACTOR_INV = ADC_REF / (65536 × RSHUNT × AMP_GAIN)
+ *   (from parameters_conversion.h, included above via mc_tasks_foc.c)
+ *
+ * Voltage: Va_V = Va_int16 × MAX_VOLTAGE / 32768
+ *   MAX_VOLTAGE = ADC_REF / (√3 × VBUS_PARTITIONING_FACTOR)
+ *   This matches the STO C5 scaling: C5 = F1×MAX_VOLTAGE/(Ls×MAX_CURRENT×TF_RATE)
+ *   so int16 full-scale (32767) = MAX_VOLTAGE ≈ 19.8 V (the highest Vphase the
+ *   ADC can sense; at 12 V Vbus the modulation index is ~35% of full scale). */
+#define EKF_I_SCALE  ((float)(CURRENT_CONV_FACTOR_INV))
+#define EKF_V_SCALE  ((float)(ADC_REFERENCE_VOLTAGE / \
+                      (1.73205080757 * VBUS_PARTITIONING_FACTOR * 32768.0)))
+#endif
 /* USER CODE END Private define */
 
 /* Private variables----------------------------------------------------------*/
@@ -55,7 +72,9 @@ static volatile uint16_t hStopPermanencyCounterM1 = ((uint16_t)0);
 #define M2_CHARGE_BOOT_CAP_DUTY_CYCLES (uint32_t)(0 * ((uint32_t)PWM_PERIOD_CYCLES2 / 2U))
 
 /* USER CODE BEGIN Private Variables */
-
+#if USE_EKF_OBSERVER
+extern EKF_Handle_t EKF_M1;   /* defined and initialised in mc_app_hooks.c */
+#endif
 /* USER CODE END Private Variables */
 
 /* Private functions ---------------------------------------------------------*/
@@ -647,7 +666,32 @@ __weak uint8_t FOC_HighFrequencyTask(uint8_t bMotorNbr)
       (void)VSS_CalcElAngle(&VirtualSpeedSensorM1, &hObsAngle);
     }
     /* USER CODE BEGIN HighFrequencyTask SINGLEDRIVE_3 */
+#if USE_EKF_OBSERVER
+    if ((IDLE != Mci[M1].State) &&
+        (FAULT_NOW != Mci[M1].State) &&
+        (FAULT_OVER != Mci[M1].State))
+    {
+      /* Convert MCSDK int16 → SI (Volts, Amps) and run one EKF predict+correct.
+       *
+       * STO_Inputs.Valfa_beta: V applied in the PREVIOUS FOC cycle (captured at
+       *   top of FOC_HighFrequencyTask before FOC_CurrControllerM1 updates it).
+       * STO_Inputs.Ialfa_beta: I measured in THIS cycle (set inside the state
+       *   guard block above, same timing as STO_PLL_CalcElAngle).
+       * This one-cycle voltage lag matches the STO observer convention. */
+      float ekf_Va = (float)STO_Inputs.Valfa_beta.alpha * EKF_V_SCALE;
+      float ekf_Vb = (float)STO_Inputs.Valfa_beta.beta  * EKF_V_SCALE;
+      float ekf_ia = (float)STO_Inputs.Ialfa_beta.alpha * EKF_I_SCALE;
+      float ekf_ib = (float)STO_Inputs.Ialfa_beta.beta  * EKF_I_SCALE;
+      EKF_Update(&EKF_M1, ekf_Va, ekf_Vb, ekf_ia, ekf_ib);
 
+      /* Overwrite STO hElAngle with EKF estimate.
+       * • RUN state: pSTC[M1] → STO_PLL_M1._Super; FOC_CurrControllerM1 reads
+       *   hElAngle via SPD_GetElAngle() on the next cycle (40 μs delay — fine).
+       * • START/SWITCH_OVER: VSS already captured STO angle above; our write
+       *   takes effect next cycle, so EKF feeds into the next VSS update. */
+      STO_PLL_M1._Super.hElAngle = EKF_GetAngleMCSdk(&EKF_M1);
+    }
+#endif
     /* USER CODE END HighFrequencyTask SINGLEDRIVE_3 */
   }
 

@@ -49,6 +49,17 @@
 #include "mc_app_hooks.h"
 #include "mc_config.h"         /* PotRegConv_M1 (ADC scheduler slot) */
 
+/* ── EKF Observer handle ─────────────────────────────────────────────────── *
+ * Defined here (custom application code); extern'd in mc_tasks_foc.c.       *
+ * Initialised in MC_APP_BootHook(); updated every FOC cycle (25 kHz) in     *
+ * FOC_HighFrequencyTask() via the USE_EKF_OBSERVER USER CODE section.       *
+ * --------------------------------------------------------------------- */
+#if USE_EKF_OBSERVER
+#include "parameters_conversion.h"   /* TF_REGULATION_RATE, RS, LS, POLE_PAIR_NUM */
+#include "esc_ekf_observer.h"
+EKF_Handle_t EKF_M1;                 /* global — init in BootHook, update in FOC ISR */
+#endif
+
 #ifdef BUILD_ESC
 #include "mc_interface.h"      /* MCI_State_t, IDLE, START, RUN, FAULT_NOW, FAULT_OVER */
 #include "mc_api.h"            /* MC_StartMotor1, MC_StopMotor1, MC_ProgramSpeedRampMotor1_F */
@@ -146,7 +157,15 @@ __weak void MC_APP_BootHook(void)
   ESC_COMM_Init();
 
 /* USER CODE BEGIN BootHook */
-
+#if USE_EKF_OBSERVER
+  /* Initialise EKF handle.  RS, LS, POLE_PAIR_NUM from pmsm_motor_parameters.h.
+   * EKF_PSI_F_WB, EKF_Q_*, EKF_R_* from drive_parameters.h.
+   * Ts = 1/TF_REGULATION_RATE (= 40 μs at 25 kHz FOC rate). */
+  EKF_Init(&EKF_M1,
+            RS, LS, EKF_PSI_F_WB, (uint8_t)POLE_PAIR_NUM,
+            1.0f / (float)TF_REGULATION_RATE,
+            EKF_Q_CURRENT, EKF_Q_BEMF, EKF_R_CURRENT);
+#endif
 /* USER CODE END BootHook */
 }
 

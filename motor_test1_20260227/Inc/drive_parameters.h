@@ -280,5 +280,23 @@
 /* ##@@_USER_CODE_START_##@@ */
 /* ##@@_USER_CODE_END_##@@ */
 
+/* ── EKF Observer (Step 5 MCSDK integration) ─────────────────────────────── *
+ *  0 = legacy STO+PLL only (HOSIM iter3 behaviour)                           *
+ *  1 = EKF runs at FOC rate (25 kHz) and overwrites STO_PLL_M1._Super.hElAngle *
+ * --------------------------------------------------------------------------- */
+#define USE_EKF_OBSERVER          1
+
+/* PM flux linkage [Wb].  Derived from MOTOR_VOLTAGE_CONSTANT = 0.25 V_rms_LL/kRPM:
+ *   Ψf = Ke_LL_rms × √2/√3 / (1000 RPM × 2π/60 × p) = 9.75×10⁻⁴ Wb  */
+#define EKF_PSI_F_WB              9.75e-4f
+
+/* EKF noise covariance — tuned from noise_floor bag (2026-03-27):
+ *   σ_I = 57 mA (ADC noise floor, motored-off current measurement)
+ *   q_i = σ_I² = 3.33×10⁻³ A² ; q_e = 10 × q_i (BEMF states more uncertain)
+ *   r_i = σ_I² = 3.33×10⁻³ A² (measurement noise matches process noise floor) */
+#define EKF_Q_CURRENT             3.33e-3f   /*!< Process noise: current states [A²]  */
+#define EKF_Q_BEMF                3.33e-2f   /*!< Process noise: BEMF states          */
+#define EKF_R_CURRENT             3.33e-3f   /*!< Measurement noise: currents [A²]    */
+
 #endif /*DRIVE_PARAMETERS_H*/
 /******************* (C) COPYRIGHT 2025 STMicroelectronics *****END OF FILE****/
