@@ -176,13 +176,15 @@
 #define PHASE4_FINAL_CURRENT_A              10.0
 
 /* Phase 5 */
-#define PHASE5_DURATION                     5000 /* ms -- HOSIM iter2: extended 4000->5000ms for longer stabilisation at reduced current.
-                                                    Phase 4 (10A) does the heavy lifting to 1600 RPM.
-                                                    Phase 5 steps DOWN to 4A to hit SNR=1.0 breakeven before SWITCH_OVER:
-                                                    at 1600 RPM: BEMF=0.400V, Rs*I=0.400V, SNR=1.00 (vs 0.71 at 6A/1700RPM).
-                                                    0 RPM/s — hold 1600 RPM steady; motor must sustain speed under load at 4A. */
+#define PHASE5_DURATION                     3000 /* ms -- HOSIM iter3: shortened 5000->3000ms; motor holds 1600+ RPM at 8A so less settling
+                                                    time is needed. 0 RPM/s — hold 1600 RPM steady for observer lock.
+                                                    iter2 tried 4A for SNR=1.0 (BEMF=Rs*I at 1600RPM) but 4A cannot sustain 1600 RPM under
+                                                    HOSIM drivetrain friction on ground — motor decelerates below OBS_MINIMUM_SPEED and
+                                                    SWITCH_OVER never fires. iter3: back to 8A (same as Ph1-3); torque margin > friction,
+                                                    motor holds or exceeds 1600 RPM; SNR = BEMF/Rs*I ≈ 0.5 but NB_CONSECUTIVE_TESTS=12
+                                                    filters false positives. */
 #define PHASE5_FINAL_SPEED_UNIT             (1600*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              4.0  /* HOSIM iter2: stepped DOWN 6->4A — SNR=1.0 at 1600RPM; risk: may not hold speed under load */
+#define PHASE5_FINAL_CURRENT_A              8.0  /* HOSIM iter3: raised 4->8A — 4A insufficient to hold 1600 RPM under ground load */
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
