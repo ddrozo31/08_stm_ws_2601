@@ -79,7 +79,7 @@ flux angle → erratic motion → ANY_STOP.
 
 ---
 
-### Iteration 2 (2026-03-26) — Applied
+### Iteration 2 (2026-03-26) — Superseded by iter3
 
 Changes applied to firmware:
 - `PHASE5_FINAL_CURRENT_A`: 6.0 → **4.0 A**
@@ -90,12 +90,31 @@ Changes applied to firmware:
 
 At 4A, 1600 RPM: BEMF = 0.4 V, Rs×I = 0.4 V → SNR = **1.0 (breakeven)**.
 
-**Risk:** HOSIM speed plateau at 6A was 1602–1668 RPM — margin is tight for sustaining
-1600 RPM at only 4A under drivetrain load. If the motor drops below 1600 RPM in phase 5,
-SWITCH_OVER will not fire.
+**Result:** Bench test with wheels off ground — SWITCH_OVER achieved, RUN reached, 8.7s
+sustained RUN at 3336–3510 RPM. Ground test — 4A cannot hold 1600 RPM against HOSIM
+drivetrain friction. Motor decelerates below OBS_MINIMUM_SPEED during Phase 5;
+SWITCH_OVER never fires. SNR goal was correct but ignored the load constraint.
 
-**Parallel recommendation:** Lubricate HOSIM differentials and driveshafts. This would
-allow the motor to reach 2800 RPM at 6A (SNR = 1.17), the proven AMORIL #1 working point.
+---
+
+### Iteration 3 (2026-03-27) — Applied
+
+Changes applied to firmware (commit 9c329f7):
+- `PHASE5_FINAL_CURRENT_A`: 4.0 → **8.0 A**
+- `PHASE5_DURATION`: 5000 → **3000 ms**
+
+**Reasoning:** 4A is insufficient to sustain 1600 RPM against HOSIM drivetrain friction.
+At 8A, torque margin exceeds friction; motor holds or exceeds 1600 RPM through Phase 5.
+SNR drops to 0.5 (BEMF=0.4V, Rs×I=0.8V) but `NB_CONSECUTIVE_TESTS=12` filters false
+positives. Duration shortened because no long settling window is needed at 8A.
+
+**Total startup time:** ~11.2 s (1500+1200+1500+2500+3000 ms), down from 13.7 s.
+
+| Condition | Current | RPM | BEMF | Rs×I | SNR | Result |
+|-----------|---------|-----|------|------|-----|--------|
+| HOSIM iter3 (current) | 8 A | 1600 | 0.400 V | 0.800 V | 0.50 | pending HW test |
+
+**Pending:** Hardware validation on HOSIM ground test.
 
 ---
 
@@ -103,10 +122,11 @@ allow the motor to reach 2800 RPM at 6A (SNR = 1.17), the proven AMORIL #1 worki
 
 | Condition | Current | RPM | BEMF | Rs×I | SNR | Result |
 |-----------|---------|-----|------|------|-----|--------|
-| AMORIL #1 (working) | 6 A | 2800 | 0.700 V | 0.600 V | 1.17 | ✓ |
-| HOSIM attempt (12A) | 12 A | 2000 | 0.500 V | 1.200 V | 0.42 | ✗ |
-| HOSIM iter 1 | 6 A | 1700 | 0.425 V | 0.600 V | 0.71 | ✗ |
-| HOSIM iter 2 (current) | 4 A | 1600 | 0.400 V | 0.400 V | 1.00 | ? |
+| AMORIL #1 (working) | 6 A | 2800 | 0.700 V | 0.600 V | 1.17 | ✓ bench+ground |
+| HOSIM attempt (12A) | 12 A | 2000 | 0.500 V | 1.200 V | 0.42 | ✗ 180° wrong-angle |
+| HOSIM iter 1 | 6 A | 1700 | 0.425 V | 0.600 V | 0.71 | ✗ 180° wrong-angle |
+| HOSIM iter 2 | 4 A | 1600 | 0.400 V | 0.400 V | 1.00 | ✓ bench / ✗ ground (can't hold RPM) |
+| HOSIM iter 3 (current) | 8 A | 1600+ | 0.400+ V | 0.800 V | 0.50 | pending HW test |
 
 `Ke = 0.25 V/kRPM`, `Rs = 0.1 Ω`, `Pole pairs = 2`
 
