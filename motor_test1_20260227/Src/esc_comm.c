@@ -24,17 +24,24 @@
 /* RX state                                                                   */
 /* -------------------------------------------------------------------------- */
 
-/* Accumulation buffer for one complete command frame. */
+/* Accumulation buffer for one complete frame (cmd or cfg — both 5 bytes). */
 static uint8_t rx_buf[ESC_CMD_FRAME_LEN];
 
-/* Current write index into rx_buf (0 = waiting for SOF). */
+/* Index into rx_buf (0 = waiting for SOF) and SOF byte of current frame. */
 static uint8_t rx_idx = 0U;
+static uint8_t rx_sof = 0U;
 
 /* Shared command state -- written only by RXNE ISR, read by application layer.
  * Initialised to 0x7FFF (full-forward / non-neutral) so that the WAIT_NEUTRAL
  * state stays active until the host explicitly sends a neutral frame.         */
 static volatile int16_t esc_cmd_value = 0x7FFF;
 static volatile uint8_t esc_cmd_fresh = 0U;
+
+/* Runtime config state -- written by RXNE ISR on valid 0xCC frames.
+ * -1.0f means "not configured": mc_app_hooks falls back to compile-time defaults. */
+static volatile float esc_cfg_max_iq_a   = -1.0f;
+static volatile float esc_cfg_revup_rpm  = -1.0f;
+static volatile float esc_cfg_boost_iq_a = -1.0f;
 
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */
@@ -71,6 +78,23 @@ void ESC_COMM_Init(void)
    * the FIFO (threshold-based interrupt RXFTIE is not needed here). */
   USART2->CR1 |= USART_CR1_RXNEIE_RXFNEIE;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Config getters                                                              */
+/* -------------------------------------------------------------------------- */
+
+/** @brief Max torque current (A) set by config frame, or -1 if not configured. */
+float ESC_COMM_GetMaxIqA(void)   { return esc_cfg_max_iq_a; }
+
+/** @brief Rev-up target speed (RPM) set by config frame, or -1 if not configured. */
+float ESC_COMM_GetRevupRPM(void) { return esc_cfg_revup_rpm; }
+
+/** @brief RUN-entry boost current (A) set by config frame, or -1 if not configured. */
+float ESC_COMM_GetBoostIqA(void) { return esc_cfg_boost_iq_a; }
+
+/* -------------------------------------------------------------------------- */
+/* Command accessors                                                           */
+/* -------------------------------------------------------------------------- */
 
 /**
   * @brief Returns the most recent validated command value.
@@ -153,10 +177,11 @@ static void ESC_COMM_ProcessByte(uint8_t byte)
 {
   if (rx_idx == 0U)
   {
-    /* Waiting for start-of-frame. */
-    if (byte == ESC_CMD_SOF)
+    /* Waiting for start-of-frame: accept command (0xAA) or config (0xCC). */
+    if ((byte == ESC_CMD_SOF) || (byte == ESC_CFG_SOF))
     {
       rx_buf[0] = byte;
+      rx_sof    = byte;
       rx_idx    = 1U;
     }
     /* Any other byte: silently discard (self-synchronising). */
@@ -173,12 +198,51 @@ static void ESC_COMM_ProcessByte(uint8_t byte)
 
       if (chk == rx_buf[4])
       {
-        int16_t raw;
-        (void)memcpy(&raw, &rx_buf[1], sizeof(int16_t));
-        esc_cmd_value = raw;
-        esc_cmd_fresh = 1U;
+        if (rx_sof == ESC_CMD_SOF)
+        {
+          /* Drive command frame: update command value. */
+          int16_t raw;
+          (void)memcpy(&raw, &rx_buf[1], sizeof(int16_t));
+          esc_cmd_value = raw;
+          esc_cmd_fresh = 1U;
+        }
+        else
+        {
+          /* Config frame: [param_id][val_lo][val_hi] */
+          uint8_t param_id = rx_buf[1];
+          int16_t val;
+          (void)memcpy(&val, &rx_buf[2], sizeof(int16_t));
+
+          if (param_id == ESC_CFG_PARAM_MAX_IQ)
+          {
+            /* val = int16_t × 0.1 A; valid range 10–150 (1.0–15.0 A) */
+            if ((val >= 10) && (val <= 150))
+            {
+              esc_cfg_max_iq_a = (float)val * 0.1f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_REVUP)
+          {
+            /* val = int16_t RPM; valid range 1600–5000
+             * Lower bound matches OBS_MINIMUM_SPEED_RPM in drive_parameters.h */
+            if ((val >= 1600) && (val <= 5000))
+            {
+              esc_cfg_revup_rpm = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_BOOST_IQ)
+          {
+            /* val = int16_t × 0.1 A; valid range 10–150 (1.0–15.0 A) */
+            if ((val >= 10) && (val <= 150))
+            {
+              esc_cfg_boost_iq_a = (float)val * 0.1f;
+            }
+          }
+          /* Unknown param_id: silently ignore. */
+        }
       }
       rx_idx = 0U;
+      rx_sof = 0U;
     }
   }
 }

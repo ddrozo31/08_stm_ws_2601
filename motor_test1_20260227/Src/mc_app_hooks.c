@@ -78,11 +78,10 @@ typedef enum
 
 /* Parameters --------------------------------------------------------------- */
 
-/* Rev-up target speed (RPM): the speed programmed into the speed loop while
- * the motor is still in open-loop START state.  Once the STO observer locks
- * and the motor transitions to RUN, torque mode takes over and this value is
- * no longer used.  Must be >= OBS_MINIMUM_SPEED_RPM (2000). */
-#define ESC_REVUP_SPEED_RPM   1700.0f
+/* Rev-up target speed (RPM): default used when no UART config frame has set
+ * ESC_CFG_PARAM_REVUP.  Must match OBS_MINIMUM_SPEED_RPM in drive_parameters.h.
+ * Override at runtime via ESC_COMM_GetRevupRPM(). */
+#define ESC_REVUP_SPEED_RPM   1600.0f
 
 /* Speed ramp applied during the rev-up transition (ms).
  * Must be slow enough for the drivetrain to follow the rotating field under
@@ -97,7 +96,7 @@ typedef enum
  * Off-ground rosbag: observer stable up to 6.4A open-loop, 4.7A in RUN.
  * 7A raises wheel force to ~11N -- breaks stiction on smooth/low-friction surfaces.
  * NOMINAL_CURRENT_A=10, IQMAX_A=10 in pmsm_motor_parameters.h support this. */
-#define ESC_MAX_IQ_A          12.0f  /* Raised 10->12A: reverse RUN crashed 2478->246 RPM in 100ms; need more torque for asymmetric drivetrain load in reverse */
+#define ESC_MAX_IQ_A          12.0f  /* Default; override at runtime via ESC_CFG_PARAM_MAX_IQ config frame */
 
 /* Torque ramp duration (ms).  Near-instant: motor decelerates ~90ms after SWITCH_OVER;
  * must apply torque much faster than that to arrest the speed drop. */
@@ -117,7 +116,7 @@ typedef enum
  * RUN) apply ESC_BOOST_IQ_A for ESC_BOOST_DURATION_MS to break drivetrain
  * stiction while the motor is still near rev-up speed (~2500 RPM).
  * After the boost period the command falls back to u * ESC_MAX_IQ_A. */
-#define ESC_BOOST_IQ_A        12.0f   /* Boost current at RUN entry (A) */
+#define ESC_BOOST_IQ_A        12.0f   /* Default boost current at RUN entry (A); override via ESC_CFG_PARAM_BOOST_IQ */
 #define ESC_BOOST_DURATION_MS 300U    /* Duration of boost (ms = hook cycles) */
 
 /* Private state ------------------------------------------------------------ */
@@ -167,6 +166,17 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
   MCI_State_t mci_st  = MC_GetSTMStateMotor1();
   float       speed   = MC_GetAverageMecSpeedMotor1_F();   /* signed RPM         */
   uint32_t    faults  = MC_GetCurrentFaultsMotor1();
+
+  /* ---- Runtime config (UART-set overrides; fall back to compile-time defaults) */
+
+  float cfg_max_iq_a   = ESC_COMM_GetMaxIqA();
+  if (cfg_max_iq_a   <= 0.0f) { cfg_max_iq_a   = ESC_MAX_IQ_A; }
+
+  float cfg_boost_iq_a = ESC_COMM_GetBoostIqA();
+  if (cfg_boost_iq_a <= 0.0f) { cfg_boost_iq_a = ESC_BOOST_IQ_A; }
+
+  float cfg_revup_rpm  = ESC_COMM_GetRevupRPM();
+  if (cfg_revup_rpm  <= 0.0f) { cfg_revup_rpm  = ESC_REVUP_SPEED_RPM; }
 
   /* ---- Timeout watchdog --------------------------------------------------- */
 
@@ -222,7 +232,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       {
         if (MC_StartMotor1())
         {
-          (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+          (void)MC_ProgramSpeedRampMotor1_F(cfg_revup_rpm, ESC_REVUP_RAMP_MS);
           esc_state = ESC_FORWARD;
         }
       }
@@ -230,7 +240,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       {
         if (MC_StartMotor1())
         {
-          (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+          (void)MC_ProgramSpeedRampMotor1_F(-cfg_revup_rpm, ESC_REVUP_RAMP_MS);
           esc_state = ESC_REVERSE;
         }
       }
@@ -261,12 +271,12 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       {
         /* Direction sanity: STO observer can converge to the 180-deg wrong
          * angle solution.  If estimated speed sign disagrees with the forward
-         * command, stop cleanly back to READY so the user can retry without
-         * having to re-send neutral (avoids the FAULT -> WAIT_NEUTRAL path). */
+         * command, stop and stay in FORWARD — the IDLE auto-restart path will
+         * retry after the back-off delay without requiring a joystick release. */
         if (speed < -50.0f)
         {
           (void)MC_StopMotor1();
-          esc_state = ESC_READY;
+          esc_restart_delay = ESC_RESTART_DELAY_MS;
         }
         else
         {
@@ -277,8 +287,8 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
            * 12 A stiction-break torque at normal operating throttle. */
           if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
           float fwd_iq = (esc_boost_ctr > 0U)
-                         ? ((u > 0.10f) ? ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A))
-                         : (u * ESC_MAX_IQ_A);
+                         ? ((u > 0.10f) ? cfg_boost_iq_a : (u * cfg_max_iq_a))
+                         : (u * cfg_max_iq_a);
           if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
           (void)MC_ProgramTorqueRampMotor1_F(fwd_iq, ESC_TORQUE_RAMP_MS);
         }
@@ -296,7 +306,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(cfg_revup_rpm, ESC_REVUP_RAMP_MS);
             esc_restart_delay = ESC_RESTART_DELAY_MS;
           }
         }
@@ -316,7 +326,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           /* Reverse pending: motor is stopped, safe to start in reverse. */
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(-cfg_revup_rpm, ESC_REVUP_RAMP_MS);
             esc_state = ESC_REVERSE;
           }
         }
@@ -325,7 +335,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
           /* Changed mind during braking: go forward instead. */
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(cfg_revup_rpm, ESC_REVUP_RAMP_MS);
             esc_state = ESC_FORWARD;
           }
         }
@@ -362,11 +372,11 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
       {
         /* Direction sanity: same as FORWARD -- if observer locked at wrong
          * angle, estimated speed will be positive despite reverse command.
-         * Stop cleanly back to READY for immediate retry. */
+         * Stop and stay in REVERSE — IDLE auto-restart retries after back-off. */
         if (speed > 50.0f)
         {
           (void)MC_StopMotor1();
-          esc_state = ESC_READY;
+          esc_restart_delay = ESC_RESTART_DELAY_MS;
         }
         else
         {
@@ -376,8 +386,8 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
            * pushed (u < -0.10), scale with stick otherwise. */
           if (esc_prev_mci_st != RUN) { esc_boost_ctr = ESC_BOOST_DURATION_MS; }
           float rev_iq = (esc_boost_ctr > 0U)
-                         ? ((u < -0.10f) ? -ESC_BOOST_IQ_A : (u * ESC_MAX_IQ_A))
-                         : (u * ESC_MAX_IQ_A);
+                         ? ((u < -0.10f) ? -cfg_boost_iq_a : (u * cfg_max_iq_a))
+                         : (u * cfg_max_iq_a);
           if (esc_boost_ctr > 0U) { esc_boost_ctr--; }
           (void)MC_ProgramTorqueRampMotor1_F(rev_iq, ESC_TORQUE_RAMP_MS);
         }
@@ -393,7 +403,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(-cfg_revup_rpm, ESC_REVUP_RAMP_MS);
             esc_restart_delay = ESC_RESTART_DELAY_MS;
           }
         }
@@ -414,7 +424,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(cfg_revup_rpm, ESC_REVUP_RAMP_MS);
           }
           esc_state = ESC_FORWARD;
         }
@@ -422,7 +432,7 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
         {
           if (MC_StartMotor1())
           {
-            (void)MC_ProgramSpeedRampMotor1_F(-ESC_REVUP_SPEED_RPM, ESC_REVUP_RAMP_MS);
+            (void)MC_ProgramSpeedRampMotor1_F(-cfg_revup_rpm, ESC_REVUP_RAMP_MS);
           }
           esc_state = ESC_REVERSE;
         }

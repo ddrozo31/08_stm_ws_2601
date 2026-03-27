@@ -176,13 +176,13 @@
 #define PHASE4_FINAL_CURRENT_A              10.0
 
 /* Phase 5 */
-#define PHASE5_DURATION                     4000 /* ms -- HOSIM: step-DOWN current 12->6A.
+#define PHASE5_DURATION                     5000 /* ms -- HOSIM iter2: extended 4000->5000ms for longer stabilisation at reduced current.
                                                     Phase 4 (10A) does the heavy lifting to 1600 RPM.
-                                                    Phase 5 holds at 6A to improve observer SNR at SWITCH_OVER:
-                                                    at 1700 RPM: BEMF=0.425V, Rs*I=0.6V, SNR=0.71 (vs 0.42 at 12A/2000RPM).
-                                                    167 RPM/s (1600->1700 RPM over 4000ms) — very gentle, motor holds speed. */
-#define PHASE5_FINAL_SPEED_UNIT             (1700*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              6.0  /* HOSIM: stepped DOWN 12->6A — reduce Rs*I dominance for observer lock */
+                                                    Phase 5 steps DOWN to 4A to hit SNR=1.0 breakeven before SWITCH_OVER:
+                                                    at 1600 RPM: BEMF=0.400V, Rs*I=0.400V, SNR=1.00 (vs 0.71 at 6A/1700RPM).
+                                                    0 RPM/s — hold 1600 RPM steady; motor must sustain speed under load at 4A. */
+#define PHASE5_FINAL_SPEED_UNIT             (1600*SPEED_UNIT/U_RPM)
+#define PHASE5_FINAL_CURRENT_A              4.0  /* HOSIM iter2: stepped DOWN 6->4A — SNR=1.0 at 1600RPM; risk: may not hold speed under load */
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
@@ -190,8 +190,8 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               1700  /* HOSIM: lowered 2000->1700; phase 5 stepped down to 6A to improve observer SNR.
-                                                    BEMF=0.425V at 1700RPM; SNR=0.71 (vs 0.42 at 12A/2000RPM).
+#define OBS_MINIMUM_SPEED_RPM               1600  /* HOSIM iter2: lowered 1700->1600; phase 5 at 4A/1600RPM for SNR=1.0 breakeven.
+                                                    BEMF=0.400V, Rs*I=0.400V at 1600RPM/4A.
                                                     Must match ESC_REVUP_SPEED_RPM in mc_app_hooks.c */
 #define NB_CONSECUTIVE_TESTS                12 /* HOSIM: raised 4->12 — observer must report valid speed for 12 consecutive ms
                                                   before SWITCH_OVER fires; filters transient 180° wrong-angle solutions
