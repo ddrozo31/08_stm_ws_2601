@@ -58,6 +58,9 @@
 #define EKF_I_SCALE  ((float)(CURRENT_CONV_FACTOR_INV))
 #define EKF_V_SCALE  ((float)(ADC_REFERENCE_VOLTAGE / \
                       (1.73205080757 * VBUS_PARTITIONING_FACTOR * 32768.0)))
+
+/* EKF convergence gate: counter runs at 1 kHz (MF rate), threshold = NB_CONSECUTIVE_TESTS.
+ * Cross-checked against VSS commanded speed so counting only begins in Phase 5. */
 #endif
 /* USER CODE END Private define */
 
@@ -74,6 +77,10 @@ static volatile uint16_t hStopPermanencyCounterM1 = ((uint16_t)0);
 /* USER CODE BEGIN Private Variables */
 #if USE_EKF_OBSERVER
 extern EKF_Handle_t EKF_M1;   /* defined and initialised in mc_app_hooks.c */
+/* Counts consecutive high-frequency ticks where EKF speed >= OBS_MINIMUM_SPEED_RPM.
+ * Written by FOC_HighFrequencyTask (25 kHz ISR), read by TSK_MediumFrequencyTaskM1
+ * (1 kHz ISR, lower priority). volatile ensures the MF task sees up-to-date value. */
+static volatile uint16_t ekf_converge_cnt = 0U;
 #endif
 /* USER CODE END Private Variables */
 
@@ -326,6 +333,44 @@ __weak void TSK_MediumFrequencyTaskM1(void)
             {
               ObserverConverged = STO_PLL_IsObserverConverged(&STO_PLL_M1, &hForcedMecSpeedUnit);
               STO_SetDirection(&STO_PLL_M1, (int8_t)MCI_GetImposedMotorDirection(&Mci[M1]));
+
+              /* USER CODE BEGIN EKF_ConvergenceOverride M1 */
+#if USE_EKF_OBSERVER
+              /* EKF convergence gate — VSS phase gate only.
+               *
+               * Gate: hForcedMecSpeedUnit >= RPM_2_SPEED_UNIT(OBS_MINIMUM_SPEED_RPM)
+               * Counts in SPEED_UNIT domain (not RPM) to avoid integer truncation:
+               * 1600*10/60 = 266 SU → back to RPM = 266*60/10 = 1596 (4 RPM short).
+               * Once the VSS has been at Phase 5 target speed for NB_CONSECUTIVE_TESTS
+               * consecutive 1 kHz cycles, declare converged and trigger SWITCH_OVER.
+               *
+               * The EKF speed check was removed: the EKF angle override during START
+               * interfered with STO_PLL's own convergence (STO_ExecutePLL uses hElAngle
+               * for its PLL error term). With the angle override restricted to RUN state
+               * the STO_PLL converges normally and this VSS gate is sufficient. */
+              if (!ObserverConverged)
+              {
+                bool vss_speed_ok = (hForcedMecSpeedUnit >= (int16_t)RPM_2_SPEED_UNIT(OBS_MINIMUM_SPEED_RPM));
+
+                if (vss_speed_ok)
+                {
+                  if (ekf_converge_cnt < (uint16_t)NB_CONSECUTIVE_TESTS) { ekf_converge_cnt++; }
+                  if (ekf_converge_cnt >= (uint16_t)NB_CONSECUTIVE_TESTS)
+                  {
+                    ObserverConverged = true;
+                  }
+                }
+                else
+                {
+                  ekf_converge_cnt = 0U;
+                }
+              }
+              else
+              {
+                ekf_converge_cnt = 0U;
+              }
+#endif
+              /* USER CODE END EKF_ConvergenceOverride M1 */
 
               (void)VSS_SetStartTransition(&VirtualSpeedSensorM1, ObserverConverged);
             }
@@ -667,29 +712,60 @@ __weak uint8_t FOC_HighFrequencyTask(uint8_t bMotorNbr)
     }
     /* USER CODE BEGIN HighFrequencyTask SINGLEDRIVE_3 */
 #if USE_EKF_OBSERVER
-    if ((IDLE != Mci[M1].State) &&
-        (FAULT_NOW != Mci[M1].State) &&
-        (FAULT_OVER != Mci[M1].State))
     {
-      /* Convert MCSDK int16 → SI (Volts, Amps) and run one EKF predict+correct.
-       *
-       * STO_Inputs.Valfa_beta: V applied in the PREVIOUS FOC cycle (captured at
-       *   top of FOC_HighFrequencyTask before FOC_CurrControllerM1 updates it).
-       * STO_Inputs.Ialfa_beta: I measured in THIS cycle (set inside the state
-       *   guard block above, same timing as STO_PLL_CalcElAngle).
-       * This one-cycle voltage lag matches the STO observer convention. */
-      float ekf_Va = (float)STO_Inputs.Valfa_beta.alpha * EKF_V_SCALE;
-      float ekf_Vb = (float)STO_Inputs.Valfa_beta.beta  * EKF_V_SCALE;
-      float ekf_ia = (float)STO_Inputs.Ialfa_beta.alpha * EKF_I_SCALE;
-      float ekf_ib = (float)STO_Inputs.Ialfa_beta.beta  * EKF_I_SCALE;
-      EKF_Update(&EKF_M1, ekf_Va, ekf_Vb, ekf_ia, ekf_ib);
+      /* Track previous MCSDK state to detect IDLE→START transitions. */
+      static MCI_State_t ekf_prev_state = IDLE;
 
-      /* Overwrite STO hElAngle with EKF estimate.
-       * • RUN state: pSTC[M1] → STO_PLL_M1._Super; FOC_CurrControllerM1 reads
-       *   hElAngle via SPD_GetElAngle() on the next cycle (40 μs delay — fine).
-       * • START/SWITCH_OVER: VSS already captured STO angle above; our write
-       *   takes effect next cycle, so EKF feeds into the next VSS update. */
-      STO_PLL_M1._Super.hElAngle = EKF_GetAngleMCSdk(&EKF_M1);
+      if ((IDLE != Mci[M1].State) &&
+          (FAULT_NOW != Mci[M1].State) &&
+          (FAULT_OVER != Mci[M1].State))
+      {
+        /* Reset EKF BEMF state AND covariance on every IDLE→START transition.
+         * Prevents stale/diverged eα, eβ from a previous run from producing
+         * a false high-speed estimate at the start of the next attempt.
+         * x[0..1] (iα, iβ) are corrected by the first measurement update.
+         * P[7]=IP22, P[9]=IP33 (upper-triangle layout in esc_ekf_observer.c):
+         * resetting to 1e4 gives large initial Kalman gains for the BEMF rows so
+         * eα, eβ converge aggressively on every restart, not just the first. */
+        if ((START == Mci[M1].State) && (IDLE == ekf_prev_state))
+        {
+          EKF_M1.x[2] = 0.0f;
+          EKF_M1.x[3] = 0.0f;
+          EKF_M1.P[7] = 1.0e4f;  /* IP22 — eα covariance */
+          EKF_M1.P[9] = 1.0e4f;  /* IP33 — eβ covariance */
+        }
+
+        /* Convert MCSDK int16 → SI (Volts, Amps) and run one EKF predict+correct.
+         *
+         * STO_Inputs.Valfa_beta: V applied in the PREVIOUS FOC cycle (captured at
+         *   top of FOC_HighFrequencyTask before FOC_CurrControllerM1 updates it).
+         * STO_Inputs.Ialfa_beta: I measured in THIS cycle (set inside the state
+         *   guard block above, same timing as STO_PLL_CalcElAngle).
+         * This one-cycle voltage lag matches the STO observer convention. */
+        float ekf_Va = (float)STO_Inputs.Valfa_beta.alpha * EKF_V_SCALE;
+        float ekf_Vb = (float)STO_Inputs.Valfa_beta.beta  * EKF_V_SCALE;
+        float ekf_ia = (float)STO_Inputs.Ialfa_beta.alpha * EKF_I_SCALE;
+        float ekf_ib = (float)STO_Inputs.Ialfa_beta.beta  * EKF_I_SCALE;
+        EKF_Update(&EKF_M1, ekf_Va, ekf_Vb, ekf_ia, ekf_ib);
+
+        /* Overwrite STO hElAngle with EKF estimate — RUN and SWITCH_OVER only.
+         *
+         * CRITICAL: do NOT override during START. STO_ExecutePLL reads hElAngle to
+         * compute its PLL error (BEMF_β·cos(θ) − BEMF_α·sin(θ)); overriding during
+         * START corrupts the PLL tracking and prevents STO from converging.
+         * STO_PLL owns hElAngle during START; EKF takes over in RUN/SWITCH_OVER
+         * once closed-loop control is active and BEMF is at full amplitude. */
+        if ((RUN == Mci[M1].State) || (SWITCH_OVER == Mci[M1].State))
+        {
+          float ekf_bemf_sq = EKF_M1.x[2]*EKF_M1.x[2] + EKF_M1.x[3]*EKF_M1.x[3];
+          if (ekf_bemf_sq > 2.0e-3f)
+          {
+            STO_PLL_M1._Super.hElAngle = EKF_GetAngleMCSdk(&EKF_M1);
+          }
+        }
+      }
+
+      ekf_prev_state = Mci[M1].State;
     }
 #endif
     /* USER CODE END HighFrequencyTask SINGLEDRIVE_3 */

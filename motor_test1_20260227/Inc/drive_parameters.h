@@ -151,40 +151,31 @@
 /******************************   START-UP PARAMETERS   **********************/
 
 /* Phase 1 */
-#define PHASE1_DURATION                     1500 /*milliseconds -- extended 1200->1500ms for HOSIM drivetrain alignment */
+#define PHASE1_DURATION                     1200 /*milliseconds -- AMORIL: restored 1500->1200ms; lighter drivetrain, shorter alignment */
 #define PHASE1_FINAL_SPEED_UNIT             (0*SPEED_UNIT/U_RPM)
-#define PHASE1_FINAL_CURRENT_A              8.0  /* HOSIM: raised 4->8A — drivetrain stiction requires strong alignment lock */
+#define PHASE1_FINAL_CURRENT_A              4.0  /* AMORIL: reduced 8->4A — lighter drivetrain, less stiction */
 
 /* Phase 2 */
 #define PHASE2_DURATION                     1200 /*milliseconds */
 #define PHASE2_FINAL_SPEED_UNIT             (500*SPEED_UNIT/U_RPM)
-#define PHASE2_FINAL_CURRENT_A              8.0  /* HOSIM: raised 6->8A — needs more torque to break stiction and accelerate drivetrain */
+#define PHASE2_FINAL_CURRENT_A              4.0  /* AMORIL: reduced 8->4A */
 
 /* Phase 3 */
-#define PHASE3_DURATION                     1500 /* ms -- extended 1200->1500ms; target lowered 1500->1000 RPM.
-                                                    Was 833 RPM/s (500->1500 in 1200ms) — stator field ramp too fast for
-                                                    rotor to follow under drivetrain load -> audible grinding.
-                                                    Now 333 RPM/s (500->1000 in 1500ms). */
+#define PHASE3_DURATION                     1200 /* ms -- AMORIL: restored 1500->1200ms; 417 RPM/s (500->1000 in 1200ms) */
 #define PHASE3_FINAL_SPEED_UNIT             (1000*SPEED_UNIT/U_RPM)
-#define PHASE3_FINAL_CURRENT_A              8.0  /* HOSIM: raised 6->8A */
+#define PHASE3_FINAL_CURRENT_A              5.0  /* AMORIL: reduced 8->5A; sufficient torque for lighter drivetrain */
 
 /* Phase 4 */
-#define PHASE4_DURATION                     2500 /* ms -- HOSIM: target lowered 1800->1600 RPM.
-                                                    240 RPM/s (1000->1600 in 2500ms) — motor stays well below current limit,
-                                                    preventing step-loss at the phase 4/5 boundary. */
+#define PHASE4_DURATION                     1800 /* ms -- AMORIL: shortened 2500->1800ms; 333 RPM/s (1000->1600 in 1800ms) */
 #define PHASE4_FINAL_SPEED_UNIT             (1600*SPEED_UNIT/U_RPM)
-#define PHASE4_FINAL_CURRENT_A              10.0
+#define PHASE4_FINAL_CURRENT_A              5.0  /* AMORIL: reduced 10->5A */
 
 /* Phase 5 */
-#define PHASE5_DURATION                     3000 /* ms -- HOSIM iter3: shortened 5000->3000ms; motor holds 1600+ RPM at 8A so less settling
-                                                    time is needed. 0 RPM/s — hold 1600 RPM steady for observer lock.
-                                                    iter2 tried 4A for SNR=1.0 (BEMF=Rs*I at 1600RPM) but 4A cannot sustain 1600 RPM under
-                                                    HOSIM drivetrain friction on ground — motor decelerates below OBS_MINIMUM_SPEED and
-                                                    SWITCH_OVER never fires. iter3: back to 8A (same as Ph1-3); torque margin > friction,
-                                                    motor holds or exceeds 1600 RPM; SNR = BEMF/Rs*I ≈ 0.5 but NB_CONSECUTIVE_TESTS=12
-                                                    filters false positives. */
+#define PHASE5_DURATION                     3000 /* ms -- hold 1600 RPM steady for EKF observer lock.
+                                                    AMORIL: 4A at 1600 RPM → SNR = (0.25×1.6)/(0.1×4) = 1.0 (breakeven).
+                                                    Lighter drivetrain can hold 1600 RPM at 4A (unlike HOSIM which needed 8A). */
 #define PHASE5_FINAL_SPEED_UNIT             (1600*SPEED_UNIT/U_RPM)
-#define PHASE5_FINAL_CURRENT_A              8.0  /* HOSIM iter3: raised 4->8A — 4A insufficient to hold 1600 RPM under ground load */
+#define PHASE5_FINAL_CURRENT_A              4.0  /* AMORIL: reduced 8->4A — SNR=1.0, lighter drivetrain holds speed at 4A */
 
 #define ENABLE_SL_ALGO_FROM_PHASE           2
 
@@ -192,12 +183,11 @@
 #define STARTING_ANGLE_DEG                  90  /*!< degrees [0...359] */
 
 /* Observer start-up output conditions  */
-#define OBS_MINIMUM_SPEED_RPM               1600  /* HOSIM iter2: lowered 1700->1600; phase 5 at 4A/1600RPM for SNR=1.0 breakeven.
-                                                    BEMF=0.400V, Rs*I=0.400V at 1600RPM/4A.
+#define OBS_MINIMUM_SPEED_RPM               1600  /* EKF campaign baseline: same threshold for HOSIM and AMORIL.
+                                                    AMORIL original was 2500 RPM (Luenberger); EKF targets 600 RPM.
                                                     Must match ESC_REVUP_SPEED_RPM in mc_app_hooks.c */
-#define NB_CONSECUTIVE_TESTS                12 /* HOSIM: raised 4->12 — observer must report valid speed for 12 consecutive ms
-                                                  before SWITCH_OVER fires; filters transient 180° wrong-angle solutions
-                                                  that triggered at 2000 RPM with high Rs*I / low BEMF ratio */
+#define NB_CONSECUTIVE_TESTS                4  /* AMORIL: restored 12->4 — original AMORIL value; lighter drivetrain,
+                                                  better SNR → observer locks faster, fewer consecutive tests needed */
 #define SPEED_BAND_UPPER_LIMIT              21 /*!< It expresses how much estimated speed can exceed forced stator electrical
                                                  without being considered wrong. In 1/16 of forced speed */
 #define SPEED_BAND_LOWER_LIMIT              11 /*!< It expresses how much estimated speed can be below forced stator electrical

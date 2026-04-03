@@ -61,6 +61,11 @@
 			<locationURI>PARENT-1-PROJECT_LOC/Src/esc_comm.c</locationURI>
 		</link>
 		<link>
+			<name>Application/User/esc_ekf_observer.c</name>
+			<type>1</type>
+			<locationURI>PARENT-1-PROJECT_LOC/Src/esc_ekf_observer.c</locationURI>
+		</link>
+		<link>
 			<name>Application/User/mc_app_hooks.c</name>
 			<type>1</type>
 			<locationURI>PARENT-1-PROJECT_LOC/Src/mc_app_hooks.c</locationURI>

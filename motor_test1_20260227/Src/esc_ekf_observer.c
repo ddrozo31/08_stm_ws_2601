@@ -71,11 +71,17 @@ void EKF_Init(EKF_Handle_t *h,
     /* Measurement noise (both α and β channels equal) */
     h->_R = r_i;
 
-    /* Initial covariance: large uncertainty */
+    /* Initial covariance.
+     * Current states (iα, iβ): ±1 A uncertainty at startup → P=1 A².
+     * BEMF states (eα, eβ): completely unknown at startup (range ±~0.5 V),
+     * set P=1e4 so Kalman gains for rows 2/3 are large → aggressive correction
+     * from zero toward true BEMF within the first few FOC cycles.
+     * Small P (1.0) for BEMF → gains near zero → filter stuck at eα=eβ=0 → no
+     * convergence → EKF_GetSpeedRPM returns ~0 throughout Phase 5. */
     h->P[IP00] = 1.0f;
     h->P[IP11] = 1.0f;
-    h->P[IP22] = 1.0f;
-    h->P[IP33] = 1.0f;
+    h->P[IP22] = 1.0e4f;  /* eα: large init uncertainty → fast convergence */
+    h->P[IP33] = 1.0e4f;  /* eβ: large init uncertainty → fast convergence */
     /* Off-diagonal elements already zero from memset */
 }
 

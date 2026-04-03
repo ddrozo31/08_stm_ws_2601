@@ -48,6 +48,7 @@
 #include "mc_type.h"
 #include "mc_app_hooks.h"
 #include "mc_config.h"         /* PotRegConv_M1 (ADC scheduler slot) */
+#include "drive_parameters.h"  /* USE_EKF_OBSERVER and other build-time params */
 
 /* ── EKF Observer handle ─────────────────────────────────────────────────── *
  * Defined here (custom application code); extern'd in mc_tasks_foc.c.       *
