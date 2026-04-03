@@ -272,7 +272,7 @@
 
 /* ── EKF Observer (Step 5 MCSDK integration) ─────────────────────────────── *
  *  0 = legacy STO+PLL only (HOSIM iter3 behaviour)                           *
- *  1 = EKF runs at FOC rate (25 kHz) and overwrites STO_PLL_M1._Super.hElAngle *
+ *  1 = EKF fully replaces STO: overwrites angle, speed, and convergence      *
  * --------------------------------------------------------------------------- */
 #define USE_EKF_OBSERVER          1
 
@@ -287,6 +287,23 @@
 #define EKF_Q_CURRENT             3.33e-3f   /*!< Process noise: current states [A²]  */
 #define EKF_Q_BEMF                3.33e-2f   /*!< Process noise: BEMF states          */
 #define EKF_R_CURRENT             3.33e-3f   /*!< Measurement noise: currents [A²]    */
+
+/* EKF convergence gate — how long (ms at 1 kHz MF rate) the EKF BEMF must
+ * exceed EKF_BEMF_SQ_CONVERGE before declaring observer-converged and
+ * triggering SWITCH_OVER.  500 ms gives the EKF a stable BEMF estimate
+ * well into Phase 5 before committing to closed-loop. */
+#define EKF_CONVERGE_DWELL_MS     500U
+
+/* EKF BEMF² threshold [V²] for the convergence dwell counter.
+ * At Ψf = 9.75e-4 Wb, 1600 RPM → |BEMF|² ≈ 0.107 V².
+ * 0.05 V² corresponds to ~1100 RPM equivalent. */
+#define EKF_BEMF_SQ_CONVERGE      0.05f
+
+/* EKF BEMF² threshold [V²] for HF angle/speed override.
+ * Lower than the convergence threshold so the EKF starts feeding
+ * angle/speed into STO_PLL_M1._Super early in Phase 3–4.
+ * 0.005 V² ≈ 360 RPM equivalent. */
+#define EKF_BEMF_SQ_OVERRIDE      0.005f
 
 #endif /*DRIVE_PARAMETERS_H*/
 /******************* (C) COPYRIGHT 2025 STMicroelectronics *****END OF FILE****/

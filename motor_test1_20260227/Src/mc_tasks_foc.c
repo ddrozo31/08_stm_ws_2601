@@ -59,8 +59,11 @@
 #define EKF_V_SCALE  ((float)(ADC_REFERENCE_VOLTAGE / \
                       (1.73205080757 * VBUS_PARTITIONING_FACTOR * 32768.0)))
 
-/* EKF convergence gate: counter runs at 1 kHz (MF rate), threshold = NB_CONSECUTIVE_TESTS.
- * Cross-checked against VSS commanded speed so counting only begins in Phase 5. */
+/* EKF-to-MCSDK speed conversion factors (compile-time).
+ * hAvrMecSpeedUnit = RPM × SPEED_UNIT / U_RPM = RPM × 10/60 = RPM/6
+ * hElSpeedDpp = RPM × POLE_PAIR_NUM × 65536 / (60 × TF_REGULATION_RATE) */
+#define EKF_RPM_TO_SU   ((float)SPEED_UNIT / (float)U_RPM)
+#define EKF_RPM_TO_DPP  ((float)POLE_PAIR_NUM * 65536.0f / (60.0f * (float)TF_REGULATION_RATE))
 #endif
 /* USER CODE END Private define */
 
@@ -336,27 +339,34 @@ __weak void TSK_MediumFrequencyTaskM1(void)
 
               /* USER CODE BEGIN EKF_ConvergenceOverride M1 */
 #if USE_EKF_OBSERVER
-              /* EKF convergence gate — VSS phase gate only.
+              /* EKF convergence gate — completely bypasses STO convergence.
                *
-               * Gate: hForcedMecSpeedUnit >= RPM_2_SPEED_UNIT(OBS_MINIMUM_SPEED_RPM)
-               * Counts in SPEED_UNIT domain (not RPM) to avoid integer truncation:
-               * 1600*10/60 = 266 SU → back to RPM = 266*60/10 = 1596 (4 RPM short).
-               * Once the VSS has been at Phase 5 target speed for NB_CONSECUTIVE_TESTS
-               * consecutive 1 kHz cycles, declare converged and trigger SWITCH_OVER.
+               * The STO (Luenberger + PLL) cannot converge at 1600 RPM because
+               * BEMF is too weak for the Luenberger observer.  That is the entire
+               * reason the EKF exists.  Instead of trying to cooperate with STO,
+               * the EKF takes over: we use ForceConvergency to bypass
+               * STO_PLL_IsObserverConverged, and seed hElAngle with the EKF
+               * angle so the Park transform at SWITCH_OVER entry (line ~383)
+               * uses a valid angle.
                *
-               * The EKF speed check was removed: the EKF angle override during START
-               * interfered with STO_PLL's own convergence (STO_ExecutePLL uses hElAngle
-               * for its PLL error term). With the angle override restricted to RUN state
-               * the STO_PLL converges normally and this VSS gate is sufficient. */
+               * Gate conditions (both must hold for EKF_CONVERGE_DWELL_MS):
+               * 1. VSS at target speed (SPEED_UNIT domain, avoids int truncation)
+               * 2. EKF BEMF² > EKF_BEMF_SQ_CONVERGE (EKF has a valid estimate) */
               if (!ObserverConverged)
               {
-                bool vss_speed_ok = (hForcedMecSpeedUnit >= (int16_t)RPM_2_SPEED_UNIT(OBS_MINIMUM_SPEED_RPM));
+                bool vss_ok  = (hForcedMecSpeedUnit >= (int16_t)RPM_2_SPEED_UNIT(OBS_MINIMUM_SPEED_RPM));
+                float ea_mf  = EKF_M1.x[2], eb_mf = EKF_M1.x[3];
+                bool bemf_ok = ((ea_mf * ea_mf + eb_mf * eb_mf) > EKF_BEMF_SQ_CONVERGE);
 
-                if (vss_speed_ok)
+                if (vss_ok && bemf_ok)
                 {
-                  if (ekf_converge_cnt < (uint16_t)NB_CONSECUTIVE_TESTS) { ekf_converge_cnt++; }
-                  if (ekf_converge_cnt >= (uint16_t)NB_CONSECUTIVE_TESTS)
+                  if (ekf_converge_cnt < EKF_CONVERGE_DWELL_MS) { ekf_converge_cnt++; }
+                  if (ekf_converge_cnt >= EKF_CONVERGE_DWELL_MS)
                   {
+                    /* Seed STO angle with EKF for the SWITCH_OVER Park transform */
+                    STO_PLL_M1._Super.hElAngle = EKF_GetAngleMCSdk(&EKF_M1);
+                    /* Bypass STO convergence — STO can never converge at this RPM */
+                    STO_PLL_M1.ForceConvergency = true;
                     ObserverConverged = true;
                   }
                 }
@@ -720,48 +730,48 @@ __weak uint8_t FOC_HighFrequencyTask(uint8_t bMotorNbr)
           (FAULT_NOW != Mci[M1].State) &&
           (FAULT_OVER != Mci[M1].State))
       {
-        /* Reset EKF BEMF state AND covariance on every IDLE→START transition.
-         * Prevents stale/diverged eα, eβ from a previous run from producing
-         * a false high-speed estimate at the start of the next attempt.
-         * x[0..1] (iα, iβ) are corrected by the first measurement update.
-         * P[7]=IP22, P[9]=IP33 (upper-triangle layout in esc_ekf_observer.c):
-         * resetting to 1e4 gives large initial Kalman gains for the BEMF rows so
-         * eα, eβ converge aggressively on every restart, not just the first. */
+        /* ── Reset EKF on every IDLE→START transition ───────────────────── */
         if ((START == Mci[M1].State) && (IDLE == ekf_prev_state))
         {
           EKF_M1.x[2] = 0.0f;
           EKF_M1.x[3] = 0.0f;
           EKF_M1.P[7] = 1.0e4f;  /* IP22 — eα covariance */
           EKF_M1.P[9] = 1.0e4f;  /* IP33 — eβ covariance */
+          STO_PLL_M1.ForceConvergency = false;  /* reset for this attempt */
         }
 
-        /* Convert MCSDK int16 → SI (Volts, Amps) and run one EKF predict+correct.
-         *
-         * STO_Inputs.Valfa_beta: V applied in the PREVIOUS FOC cycle (captured at
-         *   top of FOC_HighFrequencyTask before FOC_CurrControllerM1 updates it).
-         * STO_Inputs.Ialfa_beta: I measured in THIS cycle (set inside the state
-         *   guard block above, same timing as STO_PLL_CalcElAngle).
-         * This one-cycle voltage lag matches the STO observer convention. */
+        /* ── Run EKF predict+correct ────────────────────────────────────── */
         float ekf_Va = (float)STO_Inputs.Valfa_beta.alpha * EKF_V_SCALE;
         float ekf_Vb = (float)STO_Inputs.Valfa_beta.beta  * EKF_V_SCALE;
         float ekf_ia = (float)STO_Inputs.Ialfa_beta.alpha * EKF_I_SCALE;
         float ekf_ib = (float)STO_Inputs.Ialfa_beta.beta  * EKF_I_SCALE;
         EKF_Update(&EKF_M1, ekf_Va, ekf_Vb, ekf_ia, ekf_ib);
 
-        /* Overwrite STO hElAngle with EKF estimate — RUN and SWITCH_OVER only.
+        /* ── EKF overwrites ALL STO outputs when BEMF is sufficient ─────
          *
-         * CRITICAL: do NOT override during START. STO_ExecutePLL reads hElAngle to
-         * compute its PLL error (BEMF_β·cos(θ) − BEMF_α·sin(θ)); overriding during
-         * START corrupts the PLL tracking and prevents STO from converging.
-         * STO_PLL owns hElAngle during START; EKF takes over in RUN/SWITCH_OVER
-         * once closed-loop control is active and BEMF is at full amplitude. */
-        if ((RUN == Mci[M1].State) || (SWITCH_OVER == Mci[M1].State))
+         * The STO (Luenberger + PLL) runs but cannot converge at 1600 RPM.
+         * The EKF replaces its outputs once the BEMF estimate is valid.
+         * This runs in START, SWITCH_OVER, and RUN — no state restriction.
+         *
+         * Overwritten fields:
+         *   hElAngle          → FOC commutation angle
+         *   hAvrMecSpeedUnit  → speed PID feedback in RUN
+         *   hElSpeedDpp       → internal speed scaling
+         *   bSpeedErrorNumber → prevents SPD_Check faults in RUN
+         *
+         * We no longer worry about corrupting STO_ExecutePLL because
+         * STO convergence is bypassed entirely via ForceConvergency. */
+        float ekf_bemf_sq = EKF_M1.x[2] * EKF_M1.x[2]
+                          + EKF_M1.x[3] * EKF_M1.x[3];
+        if (ekf_bemf_sq > EKF_BEMF_SQ_OVERRIDE)
         {
-          float ekf_bemf_sq = EKF_M1.x[2]*EKF_M1.x[2] + EKF_M1.x[3]*EKF_M1.x[3];
-          if (ekf_bemf_sq > 2.0e-3f)
-          {
-            STO_PLL_M1._Super.hElAngle = EKF_GetAngleMCSdk(&EKF_M1);
-          }
+          int8_t dir = (int8_t)MCI_GetImposedMotorDirection(&Mci[M1]);
+          float ekf_rpm = EKF_GetSpeedRPM(&EKF_M1) * (float)dir;
+
+          STO_PLL_M1._Super.hElAngle        = EKF_GetAngleMCSdk(&EKF_M1);
+          STO_PLL_M1._Super.hAvrMecSpeedUnit = (int16_t)(ekf_rpm * EKF_RPM_TO_SU);
+          STO_PLL_M1._Super.hElSpeedDpp      = (int16_t)(ekf_rpm * EKF_RPM_TO_DPP);
+          STO_PLL_M1._Super.bSpeedErrorNumber = 0U;
         }
       }
 
