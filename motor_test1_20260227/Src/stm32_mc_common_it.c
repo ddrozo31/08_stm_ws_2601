@@ -55,6 +55,10 @@ void EXTI15_10_IRQHandler(void)
   if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_10))
   {
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);
-    /* Button press — unused in custom FOC Step 1 */
+    /* Button press — toggle motor start/stop for Step 2 debug */
+    if (CFOC_GetState() == CFOC_IDLE)
+      CFOC_Start(1);  /* forward */
+    else
+      CFOC_Stop();
   }
 }

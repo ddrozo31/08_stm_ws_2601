@@ -2,9 +2,12 @@
  * @file    custom_foc.c
  * @brief   Custom FOC motor control — replaces MCSDK motor control stack.
  *
- * Step 1: Bare ISR — read ADC phase currents, apply Clarke transform,
- *         output zero voltage (50% duty on all phases).
- *         Motor does not move. Validates ISR timing and ADC readings.
+ * Step 2: Open-loop startup with PI current control + SVM.
+ *   HF (25 kHz): ADC read → Clarke → Park → PI(Iq,Id) → InvPark → SVM → PWM
+ *   MF (1 kHz):  Open-loop angle ramp, current reference ramp, state machine
+ *
+ * The motor spins in open-loop at a commanded speed. No observer feedback yet
+ * (EKF integration is Step 3).
  */
 
 #include "custom_foc.h"
@@ -21,10 +24,19 @@ extern OPAMP_HandleTypeDef hopamp1;
 extern OPAMP_HandleTypeDef hopamp2;
 extern OPAMP_HandleTypeDef hopamp3;
 
+/* ── Constants ──────────────────────────────────────────────────────────── */
+#define INV_SQRT3   0.57735026919f   /* 1/√3 */
+#define SQRT3       1.73205080757f
+#define TWO_PI      6.28318530718f
+#define PI_F        3.14159265359f
+
+/* RPM → electrical rad/s: ω_e = RPM × 2π/60 × pole_pairs */
+#define RPM_TO_ERAD_S  (TWO_PI / 60.0f * (float)CFOC_POLE_PAIRS)
+
 /* ── Private state ───────────────────────────────────────────────────────── */
 static volatile CFOC_State_t cfoc_state = CFOC_IDLE;
 
-/* ADC offset calibration (zero-current mid-point) */
+/* ADC offset calibration (zero-current mid-point, 12-bit) */
 static volatile int32_t adc_offset_a = 2048;
 static volatile int32_t adc_offset_b = 2048;
 
@@ -34,16 +46,126 @@ static volatile int32_t  calib_sum_a = 0;
 static volatile int32_t  calib_sum_b = 0;
 static volatile uint8_t  calib_done  = 0U;
 
-/* Measured currents in Amps (α-β frame), written by HF ISR */
+/* Measured currents in α-β frame [A], written by HF ISR */
 static volatile float isr_Ialpha = 0.0f;
 static volatile float isr_Ibeta  = 0.0f;
 
 /* ISR cycle counter for diagnostics */
 static volatile uint32_t isr_count = 0U;
 
+/* ── Open-loop state (written by MF task, read by HF task) ──────────────── */
+static volatile float ol_theta_e  = 0.0f;   /* Electrical angle [rad] */
+static volatile float ol_omega_e  = 0.0f;   /* Electrical speed [rad/s] */
+static volatile float ol_Iq_ref   = 0.0f;   /* q-axis current reference [A] */
+static volatile float ol_Id_ref   = 0.0f;   /* d-axis current reference [A] */
+static volatile int8_t ol_direction = 1;     /* +1 forward, -1 reverse */
+static volatile uint32_t ol_ramp_ms = 0U;    /* MF tick counter since OPEN_LOOP entry */
+static volatile uint32_t align_ms   = 0U;    /* MF tick counter during ALIGNMENT */
 
-/* 1/sqrt(3) for Clarke transform */
-#define INV_SQRT3  0.57735026919f
+/* ── Voltage outputs for telemetry / future EKF feed ────────────────────── */
+static volatile float isr_Valpha = 0.0f;
+static volatile float isr_Vbeta  = 0.0f;
+
+/* ── Debug: PI outputs and d-q currents (add to Live Expressions) ──────── */
+static volatile float dbg_Vq = 0.0f;
+static volatile float dbg_Vd = 0.0f;
+static volatile float dbg_Iq = 0.0f;
+static volatile float dbg_Id = 0.0f;
+
+/* ── PI controllers ─────────────────────────────────────────────────────── */
+static CFOC_PI_t pi_iq = {
+  .Kp = CFOC_PI_IQ_KP, .Ki = CFOC_PI_IQ_KI,
+  .integral = 0.0f, .out_min = -CFOC_PI_VMAX, .out_max = CFOC_PI_VMAX
+};
+static CFOC_PI_t pi_id = {
+  .Kp = CFOC_PI_ID_KP, .Ki = CFOC_PI_ID_KI,
+  .integral = 0.0f, .out_min = -CFOC_PI_VMAX, .out_max = CFOC_PI_VMAX
+};
+
+/* ── Inline helpers ─────────────────────────────────────────────────────── */
+
+/** Run PI controller. Ki is already discretized (Ki × Ts). */
+static inline float PI_Run(CFOC_PI_t *pi, float error)
+{
+  pi->integral += pi->Ki * error;
+  /* Anti-windup clamp */
+  if (pi->integral > pi->out_max) pi->integral = pi->out_max;
+  if (pi->integral < pi->out_min) pi->integral = pi->out_min;
+
+  float out = pi->Kp * error + pi->integral;
+  /* Output clamp */
+  if (out > pi->out_max) out = pi->out_max;
+  if (out < pi->out_min) out = pi->out_min;
+  return out;
+}
+
+/** Reset PI controller state. */
+static inline void PI_Reset(CFOC_PI_t *pi)
+{
+  pi->integral = 0.0f;
+}
+
+/**
+ * Space Vector Modulation — standard 7-segment center-aligned.
+ * Input:  Valpha, Vbeta in volts.
+ * Output: writes TIM1 CCR1/2/3 directly.
+ *
+ * Normalization: duty = 0.5 + V / Vbus  (Vbus read from ADC or assumed)
+ * For now, assume Vbus ≈ 12V (3S LiPo nominal).
+ */
+static void SVM_Apply(float Valpha, float Vbeta)
+{
+  /* TODO: read actual Vbus from ADC regular channel.
+   * For Step 2, use nominal 12V. */
+  const float Vbus = 12.0f;
+  const float inv_Vbus = 1.0f / Vbus;
+  const float half_period = (float)CFOC_PWM_HALF_PERIOD;
+
+  /* Inverse Clarke to get phase voltages (balanced 3-phase):
+   *   Va = Valpha
+   *   Vb = -0.5·Valpha + (√3/2)·Vbeta
+   *   Vc = -0.5·Valpha - (√3/2)·Vbeta
+   */
+  float Va = Valpha;
+  float Vb = -0.5f * Valpha + (SQRT3 * 0.5f) * Vbeta;
+  float Vc = -0.5f * Valpha - (SQRT3 * 0.5f) * Vbeta;
+
+  /* Normalize to [-0.5, 0.5] relative to Vbus */
+  Va *= inv_Vbus;
+  Vb *= inv_Vbus;
+  Vc *= inv_Vbus;
+
+  /* Min-max injection (SVPWM equivalent — centers the waveform) */
+  float vmin = Va;
+  if (Vb < vmin) vmin = Vb;
+  if (Vc < vmin) vmin = Vc;
+  float vmax = Va;
+  if (Vb > vmax) vmax = Vb;
+  if (Vc > vmax) vmax = Vc;
+  float voffset = -(vmax + vmin) * 0.5f;
+
+  Va += voffset;
+  Vb += voffset;
+  Vc += voffset;
+
+  /* Convert to timer compare values: CCRx = (0.5 + Vx) × ARR
+   * Clamp to [1, ARR-1] to keep dead-time valid */
+  int32_t ccr_a = (int32_t)((0.5f + Va) * half_period);
+  int32_t ccr_b = (int32_t)((0.5f + Vb) * half_period);
+  int32_t ccr_c = (int32_t)((0.5f + Vc) * half_period);
+
+  /* Clamp */
+  if (ccr_a < 1) ccr_a = 1;
+  if (ccr_a > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_a = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
+  if (ccr_b < 1) ccr_b = 1;
+  if (ccr_b > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_b = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
+  if (ccr_c < 1) ccr_c = 1;
+  if (ccr_c > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_c = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
+
+  LL_TIM_OC_SetCompareCH1(TIM1, (uint32_t)ccr_a);
+  LL_TIM_OC_SetCompareCH2(TIM1, (uint32_t)ccr_b);
+  LL_TIM_OC_SetCompareCH3(TIM1, (uint32_t)ccr_c);
+}
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
@@ -96,20 +218,25 @@ void CFOC_Init(void)
   LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
 
-  /* CC4 triggers ADC injected conversions — set near top of count */
+  /* CC4 triggers ADC via TRGO=OC4REF — set near top of count */
   LL_TIM_OC_SetCompareCH4(TIM1, CFOC_PWM_HALF_PERIOD - 1U);
 
-  /* Enable TIM1 outputs (MOE bit) */
+  /* Enable PWM channel outputs (high-side + low-side for 3 phases) */
+  LL_TIM_CC_EnableChannel(TIM1,
+      LL_TIM_CHANNEL_CH1 | LL_TIM_CHANNEL_CH1N |
+      LL_TIM_CHANNEL_CH2 | LL_TIM_CHANNEL_CH2N |
+      LL_TIM_CHANNEL_CH3 | LL_TIM_CHANNEL_CH3N);
+
+  /* Enable TIM1 master output (MOE bit in BDTR) */
   LL_TIM_EnableAllOutputs(TIM1);
 
   /* Enable TIM1 update interrupt */
   LL_TIM_EnableIT_UPDATE(TIM1);
 
-  /* Enable JEOS interrupt on ADC2 — the 25 kHz FOC ISR.
-   * Self-calibration happens inside the ISR for the first N samples. */
+  /* Enable JEOS interrupt on ADC2 — the 25 kHz FOC ISR */
   LL_ADC_EnableIT_JEOS(ADC2);
 
-  /* Start TIM1 counter — CC4 match triggers ADC injected conversions */
+  /* Start TIM1 counter */
   LL_TIM_EnableCounter(TIM1);
 
   cfoc_state = CFOC_IDLE;
@@ -135,8 +262,6 @@ void CFOC_HighFrequencyTask(void)
       adc_offset_b = calib_sum_b / (int32_t)CFOC_CALIB_SAMPLES;
       calib_done = 1U;
     }
-
-    /* During calibration, keep 50% duty and skip current calculation */
     isr_count++;
     return;
   }
@@ -149,21 +274,132 @@ void CFOC_HighFrequencyTask(void)
   float Ialpha = Ia;
   float Ibeta  = (Ia + 2.0f * Ib) * INV_SQRT3;
 
-  /* Store for telemetry / debug */
+  /* Store for telemetry */
   isr_Ialpha = Ialpha;
   isr_Ibeta  = Ibeta;
 
-  /* ── 4. Step 1: Output zero voltage (50% duty) ──────────────────────── */
-  LL_TIM_OC_SetCompareCH1(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
-  LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
-  LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+  /* ── 4. State-dependent control ─────────────────────────────────────── */
+  if (cfoc_state == CFOC_IDLE || cfoc_state == CFOC_FAULT)
+  {
+    /* Zero voltage output */
+    LL_TIM_OC_SetCompareCH1(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+    LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+    LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+    isr_Valpha = 0.0f;
+    isr_Vbeta  = 0.0f;
+    isr_count++;
+    return;
+  }
+
+  /* ── Determine angle and current references based on state ─────────── */
+  float theta;
+  float Iq_ref;
+  float Id_ref;
+
+  if (cfoc_state == CFOC_ALIGNMENT)
+  {
+    /* Hold θ=0, push Id to lock rotor to d-axis.
+     * Ramp Id from 0 to CFOC_ALIGN_ID over first 100ms to avoid current spike. */
+    theta  = 0.0f;
+    Iq_ref = 0.0f;
+    float align_frac = (float)align_ms / 100.0f;
+    if (align_frac > 1.0f) align_frac = 1.0f;
+    Id_ref = CFOC_ALIGN_ID * align_frac;
+  }
+  else  /* CFOC_OPEN_LOOP (and future CROSSFADE / CLOSED_LOOP) */
+  {
+    /* Integrate angle at HF rate (25 kHz) for smooth rotor tracking.
+     * ω_e is set by MF task at 1 kHz (slow-changing ramp). */
+    float omega = ol_omega_e;
+    theta = ol_theta_e + omega * CFOC_TS;
+    if (theta > PI_F)       theta -= TWO_PI;
+    else if (theta < -PI_F) theta += TWO_PI;
+    ol_theta_e = theta;
+
+    Iq_ref = ol_Iq_ref;
+    Id_ref = ol_Id_ref;
+  }
+
+  /* ── 5. Park transform: (Iα, Iβ) → (Id, Iq) using θ_e ────────────── */
+  float sin_th, cos_th;
+  sin_th = sinf(theta);
+  cos_th = cosf(theta);
+
+  float Id =  cos_th * Ialpha + sin_th * Ibeta;
+  float Iq = -sin_th * Ialpha + cos_th * Ibeta;
+
+  /* ── 6. PI current controllers ──────────────────────────────────────── */
+  float Vd = PI_Run(&pi_id, Id_ref - Id);
+  float Vq = PI_Run(&pi_iq, Iq_ref - Iq);
+
+  /* Debug snapshot */
+  dbg_Vq = Vq;
+  dbg_Vd = Vd;
+  dbg_Iq = Iq;
+  dbg_Id = Id;
+
+  /* ── 7. Circle limitation — keep |V| ≤ Vmax ────────────────────────── */
+  float Vsq = Vd * Vd + Vq * Vq;
+  float Vmax_sq = CFOC_PI_VMAX * CFOC_PI_VMAX;
+  if (Vsq > Vmax_sq)
+  {
+    float scale = CFOC_PI_VMAX / sqrtf(Vsq);
+    Vd *= scale;
+    Vq *= scale;
+  }
+
+  /* ── 8. Inverse Park: (Vd, Vq) → (Vα, Vβ) ─────────────────────────── */
+  float Valpha = cos_th * Vd - sin_th * Vq;
+  float Vbeta  = sin_th * Vd + cos_th * Vq;
+
+  /* Store for telemetry / future EKF feed */
+  isr_Valpha = Valpha;
+  isr_Vbeta  = Vbeta;
+
+  /* ── 9. SVM → TIM1 CCR1/2/3 ────────────────────────────────────────── */
+  SVM_Apply(Valpha, Vbeta);
 
   isr_count++;
 }
 
 void CFOC_MediumFrequencyTask(void)
 {
-  /* Step 1: nothing to do at 1 kHz yet. */
+  /* ── ALIGNMENT phase: wait for rotor to lock, then transition ──────── */
+  if (cfoc_state == CFOC_ALIGNMENT)
+  {
+    align_ms++;
+    if (align_ms >= CFOC_ALIGN_MS)
+    {
+      /* Rotor is aligned to θ=0 — begin open-loop ramp */
+      ol_theta_e = 0.0f;
+      ol_omega_e = 0.0f;
+      ol_Iq_ref  = 0.0f;
+      ol_ramp_ms = 0U;
+      cfoc_state = CFOC_OPEN_LOOP;
+    }
+    return;
+  }
+
+  if (cfoc_state != CFOC_OPEN_LOOP)
+    return;
+
+  ol_ramp_ms++;
+
+  /* ── Speed ramp: 0 → target RPM over CFOC_OL_RAMP_MS ──────────────── */
+  float speed_frac = (float)ol_ramp_ms / (float)CFOC_OL_RAMP_MS;
+  if (speed_frac > 1.0f) speed_frac = 1.0f;
+
+  float target_rpm = CFOC_OL_TARGET_RPM * speed_frac;
+  ol_omega_e = target_rpm * RPM_TO_ERAD_S * (float)ol_direction;
+
+  /* Angle is integrated at 25 kHz in HF task (smooth rotor tracking) */
+
+  /* ── Current ramp: 0 → Iq_target over CFOC_OL_IQ_RAMP_MS ──────────── */
+  float iq_frac = (float)ol_ramp_ms / (float)CFOC_OL_IQ_RAMP_MS;
+  if (iq_frac > 1.0f) iq_frac = 1.0f;
+
+  ol_Iq_ref = CFOC_OL_IQ_TARGET * iq_frac * (float)ol_direction;
+  ol_Id_ref = CFOC_OL_ID_REF;
 }
 
 CFOC_State_t CFOC_GetState(void)
@@ -173,16 +409,37 @@ CFOC_State_t CFOC_GetState(void)
 
 void CFOC_Start(int8_t direction)
 {
-  (void)direction;
-  /* Step 1: no-op. Motor start implemented in Step 2. */
+  if (cfoc_state != CFOC_IDLE)
+    return;
+
+  /* Reset all state */
+  ol_theta_e  = 0.0f;
+  ol_omega_e  = 0.0f;
+  ol_Iq_ref   = 0.0f;
+  ol_Id_ref   = 0.0f;
+  ol_ramp_ms  = 0U;
+  align_ms    = 0U;
+  ol_direction = (direction >= 0) ? 1 : -1;
+
+  /* Reset PI integrators */
+  PI_Reset(&pi_iq);
+  PI_Reset(&pi_id);
+
+  /* Start with alignment: hold θ=0, push Id to lock rotor position */
+  cfoc_state = CFOC_ALIGNMENT;
 }
 
 void CFOC_Stop(void)
 {
-  /* Step 1: force 50% duty (zero voltage) */
+  /* Force 50% duty (zero voltage) */
   LL_TIM_OC_SetCompareCH1(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+
+  /* Reset PI integrators */
+  PI_Reset(&pi_iq);
+  PI_Reset(&pi_id);
+
   cfoc_state = CFOC_IDLE;
 }
 
@@ -194,10 +451,10 @@ void CFOC_GetCurrents(float *ia, float *ib)
 
 float CFOC_GetAngle(void)
 {
-  return 0.0f;  /* Step 1: no angle estimation */
+  return ol_theta_e;
 }
 
 float CFOC_GetSpeedRPM(void)
 {
-  return 0.0f;  /* Step 1: no speed estimation */
+  return ol_omega_e / RPM_TO_ERAD_S;
 }

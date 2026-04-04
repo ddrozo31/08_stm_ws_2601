@@ -4,6 +4,8 @@
  *
  * Provides sensorless FOC with EKF observer for B-G431B-ESC1 board.
  * Runs at 25 kHz (HF task in ADC ISR) + 1 kHz (MF task in SysTick).
+ *
+ * Step 2: Open-loop startup with PI current control + SVM.
  */
 #ifndef CUSTOM_FOC_H
 #define CUSTOM_FOC_H
@@ -29,13 +31,11 @@ typedef enum {
 #define CFOC_PWM_PERIOD         (CFOC_TIM_CLK_HZ / CFOC_PWM_FREQ_HZ)  /* 6800 */
 #define CFOC_PWM_HALF_PERIOD    (CFOC_PWM_PERIOD / 2U)                 /* 3400 (ARR) */
 #define CFOC_TS                 (1.0f / (float)CFOC_PWM_FREQ_HZ)       /* 40 µs */
+#define CFOC_MF_TS              0.001f  /* 1 kHz medium-frequency period [s] */
 
 /* ADC current sensing: 3-shunt via OPAMP1/2/3
  * Rshunt = 0.003 Ω, gain = 9.14 (OPAMP config on B-G431B-ESC1)
- * ADC 12-bit left-aligned → raw is 0..65535, but JDR range is 0..4095
- * Current = (offset - raw) / (4096 × Rshunt × Gain / Vref)
- * Scale: Vref/(Rshunt×Gain) = 3.3/(0.003×9.14) = 120.35 A full-scale
- * Per count: 120.35/4096 = 0.02938 A/count */
+ * Per count: 3.3/(4096 × 0.003 × 9.14) = 0.02938 A/count */
 #define CFOC_RSHUNT             0.003f
 #define CFOC_AMP_GAIN           9.14f
 #define CFOC_VREF               3.3f
@@ -53,6 +53,39 @@ typedef enum {
 /* ── Calibration ─────────────────────────────────────────────────────────── */
 #define CFOC_CALIB_SAMPLES      64U  /* ADC samples for offset calibration */
 
+/* ── Alignment parameters ────────────────────────────────────────────────── */
+#define CFOC_ALIGN_MS           300U      /* Alignment duration [ms] */
+#define CFOC_ALIGN_ID           3.0f      /* d-axis alignment current [A] */
+
+/* ── Open-loop startup parameters ────────────────────────────────────────── */
+#define CFOC_OL_RAMP_MS         3000U     /* Speed ramp duration [ms] */
+#define CFOC_OL_TARGET_RPM      1600.0f   /* Open-loop target speed [RPM] */
+#define CFOC_OL_IQ_RAMP_MS      500U      /* Current ramp duration [ms] */
+#define CFOC_OL_IQ_TARGET       5.0f      /* Open-loop Iq target [A] */
+#define CFOC_OL_ID_REF          0.0f      /* d-axis current reference (SPMSM → 0) */
+
+/* ── PI controller parameters ────────────────────────────────────────────── */
+/*
+ * Current PI bandwidth ωc ≈ 2π×1000 rad/s (1 kHz crossover):
+ *   Kp = Ls × ωc = 10µH × 6283 = 0.063
+ *   Ki = Rs × ωc = 0.1  × 6283 = 628.3  → discrete: Ki×Ts = 628.3/25000 = 0.025
+ * Vmax ≈ Vbus/√3 ≈ 12V/1.732 ≈ 6.9V (for 3S LiPo ~12V nominal)
+ */
+#define CFOC_PI_IQ_KP           0.063f
+#define CFOC_PI_IQ_KI           0.025f    /* Already discretized (Ki × Ts) */
+#define CFOC_PI_ID_KP           0.063f
+#define CFOC_PI_ID_KI           0.025f
+#define CFOC_PI_VMAX            6.9f      /* Max voltage magnitude [V] */
+
+/* ── PI controller type ──────────────────────────────────────────────────── */
+typedef struct {
+  float Kp;
+  float Ki;           /* Pre-multiplied by Ts (discrete integrator gain) */
+  float integral;
+  float out_min;
+  float out_max;
+} CFOC_PI_t;
+
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 /** Initialize custom FOC: calibrate ADC offsets, configure TIM1 PWM, start ISRs. */
@@ -67,7 +100,7 @@ void CFOC_MediumFrequencyTask(void);
 /** Get current motor state. */
 CFOC_State_t CFOC_GetState(void);
 
-/** Command motor start (from ESC layer). */
+/** Command motor start (from ESC layer). direction: +1 or -1. */
 void CFOC_Start(int8_t direction);
 
 /** Command motor stop. */
