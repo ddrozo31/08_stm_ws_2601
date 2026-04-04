@@ -5,7 +5,7 @@
  * Provides sensorless FOC with EKF observer for B-G431B-ESC1 board.
  * Runs at 25 kHz (HF task in ADC ISR) + 1 kHz (MF task in SysTick).
  *
- * Step 2: Open-loop startup with PI current control + SVM.
+ * Step 3: EKF crossfade — open-loop → closed-loop sensorless.
  */
 #ifndef CUSTOM_FOC_H
 #define CUSTOM_FOC_H
@@ -50,6 +50,14 @@ typedef enum {
 #define CFOC_POLE_PAIRS         2U
 #define CFOC_PSI_F              9.75e-4f  /* PM flux linkage [Wb] */
 
+/* ── Dead-time compensation (for EKF voltage feed) ──────────────────────── */
+/* HW_DEAD_TIME_NS=800 is total dead time; TIM1 DTG register is set to
+ * DEAD_TIME_COUNTS/2, so per-edge dead time = 400 ns.
+ * Vdt = Vbus × 2×Tdt_edge / Tpwm = 12 × 2×400ns / 40µs = 0.24V
+ * BEMF at 1600 RPM = 0.33V → Vdt is 73% of BEMF (significant). */
+#define CFOC_DEAD_TIME_NS       800U
+#define CFOC_VDT                (12.0f * (float)CFOC_DEAD_TIME_NS * 1e-9f / CFOC_TS)
+
 /* ── Calibration ─────────────────────────────────────────────────────────── */
 #define CFOC_CALIB_SAMPLES      64U      /* ADC samples for bootstrap offset */
 #define CFOC_OFFSET_EMA_ALPHA   0.002f   /* EMA smoothing for continuous offset
@@ -66,6 +74,36 @@ typedef enum {
 #define CFOC_OL_IQ_RAMP_MS      500U      /* Current ramp duration [ms] */
 #define CFOC_OL_IQ_TARGET       5.0f      /* Open-loop Iq target [A] */
 #define CFOC_OL_ID_REF          0.0f      /* d-axis current reference (SPMSM → 0) */
+#define CFOC_OL_MAX_MS          8000U     /* Safety timeout: max open-loop duration [ms] */
+
+/* ── EKF crossfade parameters ────────────────────────────────────────────── */
+/*
+ * EKF runs at 1 kHz in MF task. Crossfade from OL→EKF angle when
+ * BEMF magnitude is large enough (motor spinning fast enough for
+ * reliable angle estimate).
+ *
+ * BEMF² threshold: eα²+eβ² > CFOC_XF_BEMF_SQ_THRESH
+ *   At 1600 RPM: ω_e = 1600×2π/60×2 = 335 rad/s
+ *   BEMF = Ψf × ω_e = 9.75e-4 × 335 = 0.327 V
+ *   BEMF² = 0.107. Threshold at half = 0.05 (≈1100 RPM equivalent).
+ */
+#define CFOC_XF_BEMF_SQ_THRESH   0.05f     /* BEMF² trigger for crossfade [V²] */
+#define CFOC_XF_DWELL_MS          200U      /* BEMF must exceed threshold for this long */
+#define CFOC_XF_DURATION_MS       500U      /* Crossfade blend duration [ms] (slow for safety) */
+
+/* EKF speed filter — smooth noisy speed before angle integration.
+ * τ = 20 ms filters the electrical-frequency oscillation (~53 Hz at 1600 RPM,
+ * period 18.8 ms) by ~85%. Tracks speed changes on ~100 ms timescale.
+ * α = Ts / (τ + Ts) = 40µs / 20.04ms ≈ 0.002 */
+#define CFOC_EKF_SPEED_LPF_ALPHA  0.002f
+
+/* EKF tuning — process/measurement noise.
+ * EKF now runs at 25 kHz (was 1 kHz). Process noise scales with Ts
+ * (Q_discrete = Q_continuous × Ts), so divide original 1 kHz values by 25.
+ * R is per-sample and stays the same. */
+#define CFOC_EKF_Q_I              1.33e-4f  /* Current process noise [A²] (3.33e-3/25) */
+#define CFOC_EKF_Q_E              1.33e-3f  /* BEMF process noise [V²]   (3.33e-2/25) */
+#define CFOC_EKF_R_I              3.33e-3f  /* Measurement noise [A²] (unchanged) */
 
 /* ── PI controller parameters ────────────────────────────────────────────── */
 /*
@@ -90,17 +128,20 @@ typedef struct {
 } CFOC_PI_t;
 
 /* ── Debug log buffer (RAM ring, dumped via debugger) ────────────────────── */
-#define CFOC_LOG_SIZE  500U  /* 500 samples @ 1 kHz = 500 ms capture */
+#define CFOC_LOG_SIZE  1000U  /* 1000 samples @ 1 kHz = 1.0 s capture
+                               * (17 KB; covers OL ramp start to crossfade) */
 
 typedef struct __attribute__((packed)) {
-  uint16_t tick_ms;     /* ms since CFOC_Start (wraps at 65535) */
-  uint8_t  state;       /* CFOC_State_t */
-  int16_t  Iq_x100;    /* measured Iq [A] × 100 */
-  int16_t  Id_x100;    /* measured Id [A] × 100 */
-  int16_t  Vq_x100;    /* PI output Vq [V] × 100 */
-  int16_t  Vd_x100;    /* PI output Vd [V] × 100 */
-  int16_t  theta_x10;  /* electrical angle [deg] × 10 */
-} CFOC_LogEntry_t;      /* 13 bytes per entry, 6.5 KB total */
+  uint16_t tick_ms;      /* ms since CFOC_Start (wraps at 65535) */
+  uint8_t  state;        /* CFOC_State_t */
+  int16_t  Iq_x100;     /* measured Iq [A] × 100 */
+  int16_t  Id_x100;     /* measured Id [A] × 100 */
+  int16_t  Vq_x100;     /* PI output Vq [V] × 100 */
+  int16_t  Vd_x100;     /* PI output Vd [V] × 100 */
+  int16_t  theta_x10;   /* FOC angle (OL or blended) [deg] × 10 */
+  int16_t  ekf_theta_x10; /* EKF estimated angle [deg] × 10 */
+  int16_t  ekf_rpm;      /* EKF estimated speed [RPM] */
+} CFOC_LogEntry_t;       /* 17 bytes per entry, 8.5 KB total */
 
 extern volatile CFOC_LogEntry_t cfoc_log[CFOC_LOG_SIZE];
 extern volatile uint32_t cfoc_log_idx;

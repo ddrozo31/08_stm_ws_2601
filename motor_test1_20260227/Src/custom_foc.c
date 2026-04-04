@@ -2,15 +2,17 @@
  * @file    custom_foc.c
  * @brief   Custom FOC motor control — replaces MCSDK motor control stack.
  *
- * Step 2: Open-loop startup with PI current control + SVM.
+ * Step 3: EKF crossfade — open-loop → closed-loop sensorless.
  *   HF (25 kHz): ADC read → Clarke → Park → PI(Iq,Id) → InvPark → SVM → PWM
- *   MF (1 kHz):  Open-loop angle ramp, current reference ramp, state machine
+ *   MF (1 kHz):  EKF update, crossfade logic, open-loop ramp, state machine
  *
- * The motor spins in open-loop at a commanded speed. No observer feedback yet
- * (EKF integration is Step 3).
+ * State flow: ALIGNMENT → OPEN_LOOP → CROSSFADE → CLOSED_LOOP
+ * During OPEN_LOOP, the EKF runs in parallel. When BEMF magnitude is
+ * large enough for 200ms, crossfade blends θ_OL → θ_EKF over 50ms.
  */
 
 #include "custom_foc.h"
+#include "esc_ekf_observer.h"
 #include "stm32g4xx_ll_tim.h"
 #include "stm32g4xx_ll_adc.h"
 #include "stm32g4xx_ll_gpio.h"
@@ -64,7 +66,19 @@ static volatile int8_t ol_direction = 1;     /* +1 forward, -1 reverse */
 static volatile uint32_t ol_ramp_ms = 0U;    /* MF tick counter since OPEN_LOOP entry */
 static volatile uint32_t align_ms   = 0U;    /* MF tick counter during ALIGNMENT */
 
-/* ── Voltage outputs for telemetry / future EKF feed ────────────────────── */
+/* ── EKF observer (runs at 1 kHz in MF task) ───────────────────────────── */
+static EKF_Handle_t ekf;
+static volatile float ekf_theta_e = 0.0f;  /* EKF angle, copied to HF-accessible var */
+static volatile float ekf_omega_e = 0.0f;      /* EKF electrical speed [rad/s] (raw) */
+static volatile float ekf_omega_filt = 0.0f;  /* Low-pass filtered speed for angle integration */
+static volatile float ekf_rpm     = 0.0f;      /* EKF speed for telemetry */
+
+/* ── Crossfade state ────────────────────────────────────────────────────── */
+static volatile uint32_t xf_dwell_ms = 0U;    /* How long BEMF > threshold */
+static volatile uint32_t xf_blend_ms = 0U;    /* Progress through crossfade blend */
+static volatile float    xf_theta_e  = 0.0f;  /* Blended angle (OL+EKF) used by HF */
+
+/* ── Voltage outputs for telemetry / EKF feed ──────────────────────────── */
 static volatile float isr_Valpha = 0.0f;
 static volatile float isr_Vbeta  = 0.0f;
 
@@ -362,15 +376,47 @@ void CFOC_HighFrequencyTask(void)
     if (align_frac > 1.0f) align_frac = 1.0f;
     Id_ref = CFOC_ALIGN_ID * align_frac;
   }
-  else  /* CFOC_OPEN_LOOP (and future CROSSFADE / CLOSED_LOOP) */
+  else if (cfoc_state == CFOC_OPEN_LOOP)
   {
-    /* Integrate angle at HF rate (25 kHz) for smooth rotor tracking.
+    /* Integrate OL angle at HF rate (25 kHz) for smooth rotor tracking.
      * ω_e is set by MF task at 1 kHz (slow-changing ramp). */
     float omega = ol_omega_e;
     theta = ol_theta_e + omega * CFOC_TS;
     if (theta > PI_F)       theta -= TWO_PI;
     else if (theta < -PI_F) theta += TWO_PI;
     ol_theta_e = theta;
+
+    Iq_ref = ol_Iq_ref;
+    Id_ref = ol_Id_ref;
+  }
+  else if (cfoc_state == CFOC_CROSSFADE)
+  {
+    /* Speed crossfade: blend angular velocity (OL→EKF), not angle.
+     * This avoids any angle discontinuity — the angle is always
+     * integrated smoothly at 25 kHz from the blended speed. */
+    float alpha = (float)xf_blend_ms / (float)CFOC_XF_DURATION_MS;
+    if (alpha > 1.0f) alpha = 1.0f;
+    float omega_blend = (1.0f - alpha) * ol_omega_e + alpha * ekf_omega_filt;
+
+    theta = ol_theta_e + omega_blend * CFOC_TS;
+    if (theta >  PI_F) theta -= TWO_PI;
+    else if (theta < -PI_F) theta += TWO_PI;
+    ol_theta_e = theta;
+    xf_theta_e = theta;  /* update for log */
+
+    Iq_ref = ol_Iq_ref;
+    Id_ref = ol_Id_ref;
+  }
+  else  /* CFOC_CLOSED_LOOP */
+  {
+    /* Integrate angle at HF rate using filtered EKF speed.
+     * LPF removes the electrical-frequency oscillation in the speed
+     * estimate, giving smooth commutation. */
+    float omega = ekf_omega_filt;
+    theta = ol_theta_e + omega * CFOC_TS;
+    if (theta >  PI_F) theta -= TWO_PI;
+    else if (theta < -PI_F) theta += TWO_PI;
+    ol_theta_e = theta;  /* reuse ol_theta_e as the running angle */
 
     Iq_ref = ol_Iq_ref;
     Id_ref = ol_Id_ref;
@@ -415,6 +461,34 @@ void CFOC_HighFrequencyTask(void)
   /* ── 9. SVM → TIM1 CCR1/2/3 ────────────────────────────────────────── */
   SVM_Apply(Valpha, Vbeta);
 
+  /* ── 10. EKF update at 25 kHz (Euler needs Ts < 200µs; Ts=40µs → a1=0.6) ── */
+  if (cfoc_state >= CFOC_OPEN_LOOP && cfoc_state <= CFOC_CLOSED_LOOP)
+  {
+    /* Dead-time compensation: actual applied voltage differs from commanded
+     * because during Tdt, current freewheels through body diodes.
+     * V_actual_phase = V_cmd_phase + Vdt × sign(I_phase)
+     * Use soft-sign (I / (|I| + Ithresh)) to avoid step discontinuity at
+     * zero-crossing, which would inject 6×fe noise into the EKF. */
+    const float I_thresh = 0.5f;  /* Soft-sign knee [A] */
+    float sa = Ia / (fabsf(Ia) + I_thresh);
+    float sb = Ib / (fabsf(Ib) + I_thresh);
+    float Ic = -(Ia + Ib);
+    float sc = Ic / (fabsf(Ic) + I_thresh);
+
+    float Vdt = CFOC_VDT;
+    float Va_comp = Valpha + Vdt * (2.0f / 3.0f) * (sa - 0.5f * sb - 0.5f * sc);
+    float Vb_comp = Vbeta  + Vdt * INV_SQRT3     * (sb - sc);
+
+    EKF_Update(&ekf, Va_comp, Vb_comp, Ialpha, Ibeta);
+    ekf_theta_e = EKF_GetAngle(&ekf);
+    float rpm = EKF_GetSpeedRPM(&ekf);
+    ekf_rpm     = rpm;
+    float omega_raw = rpm * RPM_TO_ERAD_S;
+    ekf_omega_e = omega_raw;
+    /* LPF on speed for angle integration (τ ≈ 5 ms, filters ~53 Hz noise) */
+    ekf_omega_filt += CFOC_EKF_SPEED_LPF_ALPHA * (omega_raw - ekf_omega_filt);
+  }
+
   isr_count++;
 }
 
@@ -431,46 +505,131 @@ void CFOC_MediumFrequencyTask(void)
       ol_omega_e = 0.0f;
       ol_Iq_ref  = 0.0f;
       ol_ramp_ms = 0U;
+
+      /* Reset EKF for this startup.
+       * EKF runs at 25 kHz (HF rate) — Euler discretization requires
+       * Ts < 2×Ls/Rs = 200µs; at Ts=40µs, a1=0.6 (stable).
+       * At 1 kHz (Ts=1ms), a1 = -9999 → massively unstable. */
+      EKF_Init(&ekf, CFOC_RS, CFOC_LS, CFOC_PSI_F, CFOC_POLE_PAIRS,
+               CFOC_TS, CFOC_EKF_Q_I, CFOC_EKF_Q_E, CFOC_EKF_R_I);
+      xf_dwell_ms = 0U;
+      xf_blend_ms = 0U;
+
+      /* Start debug log from OL entry — captures ramp + crossfade */
+      cfoc_log_idx     = 0U;
+      log_start_tick   = HAL_GetTick();
+      cfoc_log_running = 1U;
+
       cfoc_state = CFOC_OPEN_LOOP;
     }
     goto log_sample;
   }
 
-  if (cfoc_state != CFOC_OPEN_LOOP)
+  /* EKF update moved to HF task (25 kHz) — Euler stability requires Ts < 200µs.
+   * MF task reads ekf_theta_e / ekf_rpm / ekf_omega_e written by HF. */
+
+  /* ── OPEN_LOOP: ramp speed + current, monitor BEMF for crossfade ──── */
+  if (cfoc_state == CFOC_OPEN_LOOP)
+  {
+    ol_ramp_ms++;
+
+    /* Speed ramp: 0 → target RPM over CFOC_OL_RAMP_MS */
+    float speed_frac = (float)ol_ramp_ms / (float)CFOC_OL_RAMP_MS;
+    if (speed_frac > 1.0f) speed_frac = 1.0f;
+
+    float target_rpm = CFOC_OL_TARGET_RPM * speed_frac;
+    ol_omega_e = target_rpm * RPM_TO_ERAD_S * (float)ol_direction;
+
+    /* Current ramp: 0 → Iq_target over CFOC_OL_IQ_RAMP_MS */
+    float iq_frac = (float)ol_ramp_ms / (float)CFOC_OL_IQ_RAMP_MS;
+    if (iq_frac > 1.0f) iq_frac = 1.0f;
+
+    ol_Iq_ref = CFOC_OL_IQ_TARGET * iq_frac * (float)ol_direction;
+    ol_Id_ref = CFOC_OL_ID_REF;
+
+    /* Crossfade trigger: wait for ramp to complete + dwell.
+     * Speed crossfade doesn't need angle agreement — only speed source changes. */
+    if (ol_ramp_ms >= CFOC_OL_RAMP_MS)
+    {
+      xf_dwell_ms++;
+      if (xf_dwell_ms >= CFOC_XF_DWELL_MS)
+      {
+        /* Begin speed crossfade. Seed the LPF with OL speed for smooth start. */
+        xf_blend_ms = 0U;
+        ekf_omega_filt = ol_omega_e;
+        cfoc_state  = CFOC_CROSSFADE;
+      }
+    }
+    else
+    {
+      xf_dwell_ms = 0U;  /* Reset dwell counter */
+    }
+
+    /* Safety: stop if OL runs too long without EKF convergence */
+    if (ol_ramp_ms >= CFOC_OL_MAX_MS)
+    {
+      cfoc_state = CFOC_FAULT;
+    }
+
     goto log_sample;
+  }
 
-  ol_ramp_ms++;
+  /* ── CROSSFADE: MF manages blend timer + OL ramp; HF does actual blending ── */
+  if (cfoc_state == CFOC_CROSSFADE)
+  {
+    xf_blend_ms++;
 
-  /* ── Speed ramp: 0 → target RPM over CFOC_OL_RAMP_MS ──────────────── */
-  float speed_frac = (float)ol_ramp_ms / (float)CFOC_OL_RAMP_MS;
-  if (speed_frac > 1.0f) speed_frac = 1.0f;
+    /* Keep OL ramp running (speed/current don't change during crossfade) */
+    ol_ramp_ms++;
+    float speed_frac = (float)ol_ramp_ms / (float)CFOC_OL_RAMP_MS;
+    if (speed_frac > 1.0f) speed_frac = 1.0f;
+    ol_omega_e = CFOC_OL_TARGET_RPM * speed_frac * RPM_TO_ERAD_S * (float)ol_direction;
 
-  float target_rpm = CFOC_OL_TARGET_RPM * speed_frac;
-  ol_omega_e = target_rpm * RPM_TO_ERAD_S * (float)ol_direction;
+    if (xf_blend_ms >= CFOC_XF_DURATION_MS)
+    {
+      /* Crossfade complete — fully EKF-driven */
+      cfoc_state = CFOC_CLOSED_LOOP;
+    }
 
-  /* Angle is integrated at 25 kHz in HF task (smooth rotor tracking) */
+    goto log_sample;
+  }
 
-  /* ── Current ramp: 0 → Iq_target over CFOC_OL_IQ_RAMP_MS ──────────── */
-  float iq_frac = (float)ol_ramp_ms / (float)CFOC_OL_IQ_RAMP_MS;
-  if (iq_frac > 1.0f) iq_frac = 1.0f;
-
-  ol_Iq_ref = CFOC_OL_IQ_TARGET * iq_frac * (float)ol_direction;
-  ol_Id_ref = CFOC_OL_ID_REF;
+  /* ── CLOSED_LOOP: EKF drives angle, Iq ref stays at target ─────────── */
+  if (cfoc_state == CFOC_CLOSED_LOOP)
+  {
+    /* Keep current reference at open-loop target for now.
+     * Step 4 will add speed PI: Iq_ref = speed_PI(ω_cmd - ω_ekf). */
+    ol_Iq_ref = CFOC_OL_IQ_TARGET * (float)ol_direction;
+    ol_Id_ref = CFOC_OL_ID_REF;
+    goto log_sample;
+  }
 
 log_sample:
-  /* ── Record one log entry per MF tick while active ─────────────────── */
+  /* ── Record one log entry every 3 MF ticks (333 Hz) while active ──── */
+  ;  /* empty statement after label for C compliance */
+  static uint8_t log_divider = 0U;
+  if (++log_divider < 8U) goto log_done;  /* 125 Hz → 1000 entries = 8 s */
+  log_divider = 0U;
+
   if (cfoc_log_running && cfoc_log_idx < CFOC_LOG_SIZE)
   {
+    /* Log the actual commutation angle (all states use ol_theta_e now) */
+    float log_theta = ol_theta_e;
+    if (cfoc_state == CFOC_CROSSFADE)  log_theta = xf_theta_e;
+
     uint32_t idx = cfoc_log_idx;
-    cfoc_log[idx].tick_ms   = (uint16_t)(HAL_GetTick() - log_start_tick);
-    cfoc_log[idx].state     = (uint8_t)cfoc_state;
-    cfoc_log[idx].Iq_x100   = (int16_t)(dbg_Iq * 100.0f);
-    cfoc_log[idx].Id_x100   = (int16_t)(dbg_Id * 100.0f);
-    cfoc_log[idx].Vq_x100   = (int16_t)(dbg_Vq * 100.0f);
-    cfoc_log[idx].Vd_x100   = (int16_t)(dbg_Vd * 100.0f);
-    cfoc_log[idx].theta_x10 = (int16_t)(ol_theta_e * (1800.0f / PI_F)); /* rad→deg×10 */
+    cfoc_log[idx].tick_ms       = (uint16_t)(HAL_GetTick() - log_start_tick);
+    cfoc_log[idx].state         = (uint8_t)cfoc_state;
+    cfoc_log[idx].Iq_x100      = (int16_t)(dbg_Iq * 100.0f);
+    cfoc_log[idx].Id_x100      = (int16_t)(dbg_Id * 100.0f);
+    cfoc_log[idx].Vq_x100      = (int16_t)(dbg_Vq * 100.0f);
+    cfoc_log[idx].Vd_x100      = (int16_t)(dbg_Vd * 100.0f);
+    cfoc_log[idx].theta_x10    = (int16_t)(log_theta * (1800.0f / PI_F));
+    cfoc_log[idx].ekf_theta_x10 = (int16_t)(ekf_theta_e * (1800.0f / PI_F));
+    cfoc_log[idx].ekf_rpm      = (int16_t)ekf_rpm;
     cfoc_log_idx = idx + 1U;
   }
+log_done: (void)0;
 }
 
 CFOC_State_t CFOC_GetState(void)
@@ -496,10 +655,18 @@ void CFOC_Start(int8_t direction)
   PI_Reset(&pi_iq);
   PI_Reset(&pi_id);
 
-  /* Start debug log (overwrites previous capture) */
+  /* Reset crossfade state */
+  xf_dwell_ms = 0U;
+  xf_blend_ms = 0U;
+  xf_theta_e  = 0.0f;
+  ekf_theta_e   = 0.0f;
+  ekf_omega_e   = 0.0f;
+  ekf_omega_filt = 0.0f;
+  ekf_rpm       = 0.0f;
+
+  /* Debug log starts at OPEN_LOOP entry (not alignment) to capture crossfade */
   cfoc_log_idx     = 0U;
-  log_start_tick   = HAL_GetTick();
-  cfoc_log_running = 1U;
+  cfoc_log_running = 0U;
 
   /* Start with alignment: hold θ=0, push Id to lock rotor position */
   cfoc_state = CFOC_ALIGNMENT;
@@ -527,10 +694,13 @@ void CFOC_GetCurrents(float *ia, float *ib)
 
 float CFOC_GetAngle(void)
 {
+  /* All states now use ol_theta_e as the running integrated angle */
   return ol_theta_e;
 }
 
 float CFOC_GetSpeedRPM(void)
 {
+  if (cfoc_state == CFOC_CLOSED_LOOP || cfoc_state == CFOC_CROSSFADE)
+    return ekf_rpm;
   return ol_omega_e / RPM_TO_ERAD_S;
 }

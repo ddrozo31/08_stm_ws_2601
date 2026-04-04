@@ -7,7 +7,7 @@ Usage:
   2. Open Memory view, go to address of `cfoc_log` (find via Expressions).
   3. Right-click → Export Memory…
      - Start: address of cfoc_log
-     - Length: cfoc_log_idx × 13  (each entry is 13 bytes)
+     - Length: cfoc_log_idx × 17  (each entry is 17 bytes)
      - Format: Raw Binary
      - Save as: cfoc_dump.bin
   4. Run:  python3 tests/parse_cfoc_log.py cfoc_dump.bin
@@ -30,8 +30,10 @@ import os
 #   int16_t  Vq_x100
 #   int16_t  Vd_x100
 #   int16_t  theta_x10
-ENTRY_FMT = '<HBhhhhh'  # little-endian
-ENTRY_SIZE = struct.calcsize(ENTRY_FMT)  # 13 bytes
+#   int16_t  ekf_theta_x10
+#   int16_t  ekf_rpm
+ENTRY_FMT = '<HBhhhhhhh'  # little-endian
+ENTRY_SIZE = struct.calcsize(ENTRY_FMT)  # 17 bytes
 
 STATE_NAMES = {
     0: 'IDLE',
@@ -49,7 +51,7 @@ def parse_binary(data):
     n = len(data) // ENTRY_SIZE
     for i in range(n):
         chunk = data[i * ENTRY_SIZE:(i + 1) * ENTRY_SIZE]
-        tick, state, iq, id_, vq, vd, theta = struct.unpack(ENTRY_FMT, chunk)
+        tick, state, iq, id_, vq, vd, theta, ekf_theta, ekf_rpm = struct.unpack(ENTRY_FMT, chunk)
         entries.append({
             'tick_ms':  tick,
             'state':    STATE_NAMES.get(state, f'?{state}'),
@@ -58,6 +60,8 @@ def parse_binary(data):
             'Vq_V':     vq / 100.0,
             'Vd_V':     vd / 100.0,
             'theta_deg': theta / 10.0,
+            'ekf_deg':  ekf_theta / 10.0,
+            'ekf_rpm':  ekf_rpm,
         })
     return entries
 
@@ -78,12 +82,13 @@ def parse_hex_file(path):
 
 def print_table(entries):
     """Print entries as a formatted table."""
-    header = f"{'tick':>6}  {'state':<12} {'Iq(A)':>7} {'Id(A)':>7} {'Vq(V)':>7} {'Vd(V)':>7} {'θ(°)':>8}"
+    header = f"{'tick':>6}  {'state':<12} {'Iq(A)':>7} {'Id(A)':>7} {'Vq(V)':>7} {'Vd(V)':>7} {'θ(°)':>8} {'EKFθ(°)':>8} {'EKF RPM':>8}"
     print(header)
     print('-' * len(header))
     for e in entries:
         print(f"{e['tick_ms']:>6}  {e['state']:<12} {e['Iq_A']:>7.2f} {e['Id_A']:>7.2f} "
-              f"{e['Vq_V']:>7.2f} {e['Vd_V']:>7.2f} {e['theta_deg']:>8.1f}")
+              f"{e['Vq_V']:>7.2f} {e['Vd_V']:>7.2f} {e['theta_deg']:>8.1f} "
+              f"{e['ekf_deg']:>8.1f} {e['ekf_rpm']:>8}")
 
 
 def save_csv(entries, path):
@@ -127,6 +132,9 @@ def print_summary(entries):
         print(f"\nOpen-loop angle range: {min(thetas):.1f}° .. {max(thetas):.1f}°")
         duration = ol_entries[-1]['tick_ms'] - ol_entries[0]['tick_ms']
         print(f"Open-loop duration: {duration} ms")
+        ekf_rpms = [e['ekf_rpm'] for e in ol_entries if e['ekf_rpm'] != 0]
+        if ekf_rpms:
+            print(f"EKF speed during OL: {min(ekf_rpms)}..{max(ekf_rpms)} RPM")
     else:
         print("\n⚠ Never reached OPEN_LOOP state!")
 
@@ -135,6 +143,31 @@ def print_summary(entries):
         duration = align_entries[-1]['tick_ms'] - align_entries[0]['tick_ms']
         peak_id = max(abs(e['Id_A']) for e in align_entries)
         print(f"\nAlignment duration: {duration} ms, peak |Id| = {peak_id:.2f} A")
+
+    # Crossfade info
+    xf_entries = [e for e in entries if e['state'] == 'CROSSFADE']
+    if xf_entries:
+        duration = xf_entries[-1]['tick_ms'] - xf_entries[0]['tick_ms']
+        print(f"\nCrossfade duration: {duration} ms")
+        # Angle difference at start and end
+        start = xf_entries[0]
+        end = xf_entries[-1]
+        print(f"  Start: θ_foc={start['theta_deg']:.1f}°, θ_ekf={start['ekf_deg']:.1f}° (diff={start['ekf_deg']-start['theta_deg']:.1f}°)")
+        print(f"  End:   θ_foc={end['theta_deg']:.1f}°, θ_ekf={end['ekf_deg']:.1f}° (diff={end['ekf_deg']-end['theta_deg']:.1f}°)")
+    else:
+        print("\n⚠ Never reached CROSSFADE state!")
+
+    # Closed-loop info
+    cl_entries = [e for e in entries if e['state'] == 'CLOSED_LOOP']
+    if cl_entries:
+        duration = cl_entries[-1]['tick_ms'] - cl_entries[0]['tick_ms']
+        rpms = [e['ekf_rpm'] for e in cl_entries]
+        iqs = [abs(e['Iq_A']) for e in cl_entries]
+        print(f"\nClosed-loop duration: {duration} ms")
+        print(f"  Speed: {min(rpms)}..{max(rpms)} RPM (mean={sum(rpms)/len(rpms):.0f})")
+        print(f"  |Iq|: {min(iqs):.2f}..{max(iqs):.2f} A")
+    else:
+        print("\n⚠ Never reached CLOSED_LOOP state!")
 
 
 def main():

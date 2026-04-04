@@ -101,7 +101,11 @@ void EKF_Update(EKF_Handle_t *h,
     const float inv_psi  = h->_inv_psi;
 
     /* ── 1. Electrical speed from current BEMF estimate ────────────────── */
-    float omega_e = sqrtf(ea * ea + eb * eb) * inv_psi + 1e-12f;
+    /* Floor omega_e at 10 rad/s (~48 mech RPM for p=2) to keep the
+     * Jacobian term d = Ts/(Ψf²·ω_e) bounded.  Without this, omega_e ≈ 0
+     * at startup makes d → Inf → NaN propagation through P and K. */
+    float omega_e = sqrtf(ea * ea + eb * eb) * inv_psi;
+    if (omega_e < 10.0f) omega_e = 10.0f;
 
     /* ── 2. Exact BEMF rotation (mandatory even at Ts=40μs) ─────────────────
      *
