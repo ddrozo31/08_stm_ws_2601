@@ -252,34 +252,47 @@ Record rosbag → `python3 tests/analyze_rosbag.py`
 
 ---
 
-### Step 3: EKF + Crossfade to Closed-Loop
+### Step 3: EKF + Crossfade to Closed-Loop ✅ DONE (2026-04-04)
 
 **Goal:** Motor transitions from open-loop to EKF-driven closed-loop. **This is the critical step.**
 
-**What to implement:**
-1. **EKF runs from the start of OPEN_LOOP** (already have `EKF_Update`):
-   - Feed Vα, Vβ (from previous cycle) and Iα, Iβ (measured)
-   - Reset EKF BEMF states + covariance on every startup
-2. **Crossfade trigger:** when `EKF_BEMF² > threshold` for 200ms continuously
-3. **Crossfade blend (50ms):**
-   ```
-   α = 1.0 - (crossfade_counter / CROSSFADE_DURATION)
-   θ = α × θ_OL + (1-α) × θ_EKF
-   ```
-   - Use the blended θ for Park/RevPark in the HF task
-   - At α = 0: fully closed-loop, transition to CLOSED_LOOP state
-4. **Angle unwrap:** ensure θ_OL and θ_EKF are within π of each other before blending
-   (prevent 360° jumps)
+**What was implemented:**
+1. **EKF at 25 kHz (HF task)** — Euler discretization requires Ts < 2×Ls/Rs = 200µs;
+   at 1 kHz (Ts=1ms), a1 = 1−Ts×Rs/Ls = −9999 → divergence. Moved to HF task (Ts=40µs, a1=0.6).
+   Q noise scaled ÷25 for higher rate. R unchanged.
+2. **Dead-time compensation** — 800ns dead time creates Vdt≈0.24V/phase error (~73% of BEMF
+   at 1600 RPM). Soft-sign compensation in αβ frame: `I/(|I|+0.5)` avoids zero-crossing step.
+3. **Speed crossfade (NOT angle crossfade)** — EKF angle has ~50° residual offset; blending
+   angles caused field loss → 29A overcurrent spike. Instead blend angular velocity:
+   `ω_blend = (1−α)×ω_OL + α×ω_EKF_filtered`, then integrate for commutation angle.
+4. **EKF speed LPF** — Raw EKF speed oscillates ±2000 RPM at electrical frequency.
+   First-order LPF τ=20ms (α=0.002) smooths before angle integration.
+5. **Crossfade trigger** — `ol_ramp_ms >= OL_RAMP_MS` + 200ms dwell counter.
+   BEMF² threshold alone was unreliable at low speed.
 
-**Key thresholds (starting point, tunable):**
-- `CROSSFADE_BEMF_SQ_THRESHOLD = 0.02f` (≈700 RPM equivalent)
-- `CROSSFADE_DWELL_MS = 200U` (200ms stable BEMF before starting crossfade)
-- `CROSSFADE_DURATION_MS = 50U` (50ms blend)
+**Hardware validation results (B-G431B-ESC1, AMORIL car, 2026-04-04):**
 
-**Hardware test:** Motor should reach CLOSED_LOOP state. 
-Telemetry should show smooth speed through the crossfade.
+| Metric | Expected | Measured | Status |
+|--------|----------|----------|--------|
+| EKF convergence | during OL ramp | yes, speed tracks | ✅ |
+| Crossfade trigger | at ramp end + 200ms | ~3200ms | ✅ |
+| Crossfade smoothness | no jerks | smooth acceleration | ✅ |
+| Closed-loop sustained | indefinite | yes, runs until button stop | ✅ |
+| Overcurrent faults | none | none | ✅ |
+| Motor sound | smooth | smooth, consistent acceleration | ✅ |
 
-**Estimated new code:** ~60 lines (crossfade logic + state transitions)
+**Key bugs found during debug (12+ HW iterations, cfoc5–cfoc16):**
+1. **EKF Euler instability at 1 kHz** — a1=−9999 → immediate divergence → crash at Kalman gain
+2. **~100° EKF angle offset** — dead time not compensated in EKF voltage feed
+3. **DT compensation wrong sign** — subtraction made offset worse (100°→170°), flipped to addition
+4. **DT compensation too large** — TIM1 DTG uses DEAD_TIME_COUNTS/2, actual per-edge=400ns not 800ns
+5. **Premature crossfade** — soft-sign DT at low current let EKF converge to false angle at ~0 RPM
+6. **Angle crossfade overcurrent** — ~50° angle error + blend → field loss → 29A positive feedback
+7. **Jerky closed-loop** — raw EKF speed noise ±2000 RPM at electrical frequency
+
+**Known limitation:** Motor accelerates to ~10000 RPM (no speed controller, fixed Iq=5A). Expected — speed control is Step 4.
+
+**Actual new code:** ~300 lines added/modified in custom_foc.c + custom_foc.h
 
 ---
 
