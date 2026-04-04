@@ -94,10 +94,11 @@ static void CFOC_StartPWM(void)
   LL_TIM_EnableIT_UPDATE(TIM1);
 
   /* Start ADC injected conversions (triggered by TIM1 CC4).
-   * Do NOT enable JEOS interrupt yet — calibration needs to poll JEOS.
-   * The interrupt is enabled after calibration in CFOC_Init(). */
-  LL_ADC_INJ_StartConversion(ADC1);
-  LL_ADC_INJ_StartConversion(ADC2);
+   * Use HAL — it handles ADC enable + JSQR queue reload + JADSTART.
+   * Do NOT use _IT variant — calibration needs to poll JEOS first.
+   * The JEOS interrupt is enabled after calibration in CFOC_Init(). */
+  HAL_ADCEx_InjectedStart(&hadc1);
+  HAL_ADCEx_InjectedStart(&hadc2);
 
   /* Synchronized start via TIM2 trigger (same technique as MCSDK) */
   LL_TIM_SetTriggerInput(TIM1, LL_TIM_TS_ITR1);
@@ -129,16 +130,9 @@ void CFOC_Init(void)
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
 
-  /* Re-enable ADCs after calibration — JADSTART requires ADEN=1 */
-  LL_ADC_Enable(ADC1);
-  while (!LL_ADC_IsActiveFlag_ADRDY(ADC1)) { /* wait */ }
-  LL_ADC_ClearFlag_ADRDY(ADC1);
-
-  LL_ADC_Enable(ADC2);
-  while (!LL_ADC_IsActiveFlag_ADRDY(ADC2)) { /* wait */ }
-  LL_ADC_ClearFlag_ADRDY(ADC2);
-
   /* Start PWM with 50% duty (zero voltage).
+   * HAL_ADCEx_InjectedStart (called inside CFOC_StartPWM) handles
+   * ADC enable + JSQR queue reload + JADSTART.
    * TIM1 starts counting, CC4 triggers ADC injected conversions.
    * JEOS interrupt is NOT enabled yet — calibration polls JEOS. */
   CFOC_StartPWM();
