@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "custom_foc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -133,12 +133,11 @@ int main(void)
   MX_OPAMP3_Init();
   MX_TIM1_Init();
   MX_USART2_UART_Init();
-  MX_MotorControl_Init();
 
   /* Initialize interrupts */
   MX_NVIC_Init();
   /* USER CODE BEGIN 2 */
-
+  CFOC_Init();  /* Custom FOC: calibrate ADC, start PWM + ISRs */
   /* USER CODE END 2 */
 
   /* Infinite loop */

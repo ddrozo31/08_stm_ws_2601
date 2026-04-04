@@ -1,61 +1,19 @@
-
 /**
-  ******************************************************************************
-  * @file    stm32g4xx_mc_it.c
-  * @author  Motor Control SDK Team, ST Microelectronics
-  * @brief   Main Interrupt Service Routines.
-  *          This file provides exceptions handler and peripherals interrupt
-  *          service routine related to Motor Control for the STM32G4 Family.
-  ******************************************************************************
-  * @attention
-  *
-  * <h2><center>&copy; Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.</center></h2>
-  *
-  * This software component is licensed by ST under Ultimate Liberty license
-  * SLA0044, the "License"; You may not use this file except in compliance with
-  * the License. You may obtain a copy of the License at:
-  *                             www.st.com/SLA0044
-  *
-  ******************************************************************************
-  * @ingroup STM32G4xx_IRQ_Handlers
-  */
+ * @file    stm32g4xx_mc_it.c
+ * @brief   Motor control peripheral ISRs (custom FOC version).
+ *
+ * Replaces the MCSDK-generated version. Handles:
+ * - ADC1_2: end-of-injected-sequence → 25 kHz FOC task
+ * - TIM1 UP: clear update flag (no R3_2 sampling reconfiguration)
+ * - TIM1 BRK: overcurrent/overvoltage → disable PWM, set fault
+ */
 
-/* Includes ------------------------------------------------------------------*/
-#include "mc_config.h"
-#include "mc_type.h"
-//cstat -MISRAC2012-Rule-3.1
-#include "mc_tasks.h"
-//cstat +MISRAC2012-Rule-3.1
-#include "motorcontrol.h"
+#include "main.h"
+#include "stm32g4xx_ll_adc.h"
+#include "stm32g4xx_ll_tim.h"
+#include "custom_foc.h"
 
-/* USER CODE BEGIN Includes */
-
-/* USER CODE END Includes */
-
-/** @addtogroup MCSDK
-  * @{
-  */
-
-/** @addtogroup STM32G4xx_IRQ_Handlers STM32G4xx IRQ Handlers
-  * @{
-  */
-
-/* USER CODE BEGIN PRIVATE */
-
-/* Private typedef -----------------------------------------------------------*/
-/* Private define ------------------------------------------------------------*/
-/* Private macro -------------------------------------------------------------*/
-/* Private variables ---------------------------------------------------------*/
-/* Private function prototypes -----------------------------------------------*/
-/* Private functions ---------------------------------------------------------*/
-
-/* USER CODE END PRIVATE */
-
-/* Public prototypes of IRQ handlers called from assembly code ---------------*/
-void ADC1_2_IRQHandler(void);
-void TIMx_UP_M1_IRQHandler(void);
-void TIMx_BRK_M1_IRQHandler(void);
+/* ── ADC1/ADC2 end-of-injected-sequence (25 kHz FOC ISR) ────────────────── */
 
 #if defined (CCMRAM)
 #if defined (__ICCARM__)
@@ -64,30 +22,13 @@ void TIMx_BRK_M1_IRQHandler(void);
 __attribute__((section (".ccmram")))
 #endif
 #endif
-/**
-  * @brief  This function handles ADC1/ADC2 interrupt request.
-  * @param  None
-  */
 void ADC1_2_IRQHandler(void)
 {
-  /* USER CODE BEGIN ADC1_2_IRQn 0 */
-
-  /* USER CODE END ADC1_2_IRQn 0 */
-
-    /* Clear Flags M1 */
-    LL_ADC_ClearFlag_JEOS(ADC2);
-
-  /* Highfrequency task */
-  (void)TSK_HighFrequencyTask();
-
-  /* USER CODE BEGIN HighFreq */
-
-  /* USER CODE END HighFreq  */
-
-  /* USER CODE BEGIN ADC1_2_IRQn 1 */
-
-  /* USER CODE END ADC1_2_IRQn 1 */
+  LL_ADC_ClearFlag_JEOS(ADC2);
+  CFOC_HighFrequencyTask();
 }
+
+/* ── TIM1 Update (PWM period boundary) ──────────────────────────────────── */
 
 #if defined (CCMRAM)
 #if defined (__ICCARM__)
@@ -96,67 +37,26 @@ void ADC1_2_IRQHandler(void)
 __attribute__((section (".ccmram")))
 #endif
 #endif
-/**
-  * @brief  This function handles first motor TIMx Update interrupt request.
-  * @param  None
-  */
-void TIMx_UP_M1_IRQHandler(void)
+void TIM1_UP_TIM16_IRQHandler(void)
 {
- /* USER CODE BEGIN TIMx_UP_M1_IRQn 0 */
-
- /* USER CODE END  TIMx_UP_M1_IRQn 0 */
-
   LL_TIM_ClearFlag_UPDATE(TIM1);
-  (void)R3_2_TIMx_UP_IRQHandler(&PWM_Handle_M1);
-
- /* USER CODE BEGIN TIMx_UP_M1_IRQn 1 */
-
- /* USER CODE END  TIMx_UP_M1_IRQn 1 */
+  /* Custom FOC: no sampling-point reconfiguration needed in Step 1.
+   * Future: sector-dependent ADC window adjustment goes here. */
 }
 
-void TIMx_BRK_M1_IRQHandler(void)
+/* ── TIM1 Break (overcurrent / overvoltage) ──────────────────────────────── */
+
+void TIM1_BRK_TIM15_IRQHandler(void)
 {
-  /* USER CODE BEGIN TIMx_BRK_M1_IRQn 0 */
-
-  /* USER CODE END TIMx_BRK_M1_IRQn 0 */
-
-  if (0U == LL_TIM_IsActiveFlag_BRK(TIM1))
-  {
-    /* Nothing to do */
-  }
-  else
+  if (LL_TIM_IsActiveFlag_BRK(TIM1))
   {
     LL_TIM_ClearFlag_BRK(TIM1);
-    PWMC_OCP_Handler(&PWM_Handle_M1._Super);
+    CFOC_Stop();  /* Overcurrent: PWM already disabled by hardware */
   }
 
-  if (0U == LL_TIM_IsActiveFlag_BRK2(TIM1))
-  {
-    /* Nothing to do */
-  }
-  else
+  if (LL_TIM_IsActiveFlag_BRK2(TIM1))
   {
     LL_TIM_ClearFlag_BRK2(TIM1);
-    PWMC_OVP_Handler(&PWM_Handle_M1._Super, TIM1);
+    CFOC_Stop();  /* Overvoltage */
   }
-
-  /* Systick is not executed due low priority so is necessary to call MC_Scheduler here */
-  MC_RunMotorControlTasks();
-
-  /* USER CODE BEGIN TIMx_BRK_M1_IRQn 1 */
-
-  /* USER CODE END TIMx_BRK_M1_IRQn 1 */
 }
-
-/* USER CODE BEGIN 1 */
-
-/* USER CODE END 1 */
-
-/**
-  * @}
-  */
-
-/**
-  * @}
-  */
-/******************* (C) COPYRIGHT 2025 STMicroelectronics *****END OF FILE****/
