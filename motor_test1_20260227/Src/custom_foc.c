@@ -16,6 +16,7 @@
 #include "stm32g4xx_ll_gpio.h"
 #include "stm32g4xx_hal.h"
 #include <math.h>
+#include <stdbool.h>
 
 /* ── ADC handles (declared in main.c) ───────────────────────────────────── */
 extern ADC_HandleTypeDef hadc1;
@@ -36,9 +37,10 @@ extern OPAMP_HandleTypeDef hopamp3;
 /* ── Private state ───────────────────────────────────────────────────────── */
 static volatile CFOC_State_t cfoc_state = CFOC_IDLE;
 
-/* ADC offset calibration (zero-current mid-point, 12-bit) */
-static volatile int32_t adc_offset_a = 2048;
-static volatile int32_t adc_offset_b = 2048;
+/* ADC offset calibration (zero-current mid-point, 12-bit).
+ * Float for continuous EMA tracking — avoids integer truncation drift. */
+static volatile float adc_offset_a = 2048.0f;
+static volatile float adc_offset_b = 2048.0f;
 
 /* Self-calibration accumulators (run inside ISR for first N samples) */
 static volatile uint32_t calib_count = 0U;
@@ -71,6 +73,17 @@ static volatile float dbg_Vq = 0.0f;
 static volatile float dbg_Vd = 0.0f;
 static volatile float dbg_Iq = 0.0f;
 static volatile float dbg_Id = 0.0f;
+static volatile uint32_t dbg_ccr1 = 0U;
+static volatile uint32_t dbg_ccr2 = 0U;
+static volatile uint32_t dbg_ccr3 = 0U;
+static volatile int32_t  dbg_raw_a = 0;
+static volatile int32_t  dbg_raw_b = 0;
+
+/* ── Debug log buffer ──────────────────────────────────────────────────── */
+volatile CFOC_LogEntry_t cfoc_log[CFOC_LOG_SIZE];
+volatile uint32_t cfoc_log_idx     = 0U;
+volatile uint8_t  cfoc_log_running = 0U;
+static volatile uint32_t log_start_tick = 0U;
 
 /* ── PI controllers ─────────────────────────────────────────────────────── */
 static CFOC_PI_t pi_iq = {
@@ -84,15 +97,26 @@ static CFOC_PI_t pi_id = {
 
 /* ── Inline helpers ─────────────────────────────────────────────────────── */
 
-/** Run PI controller. Ki is already discretized (Ki × Ts). */
+/** Run PI controller with conditional-integration antiwindup.
+ *  Ki is already discretized (Ki × Ts).
+ *  Integration is frozen when the output saturates AND the error
+ *  would push it further into saturation (same sign). */
 static inline float PI_Run(CFOC_PI_t *pi, float error)
 {
-  pi->integral += pi->Ki * error;
-  /* Anti-windup clamp */
-  if (pi->integral > pi->out_max) pi->integral = pi->out_max;
-  if (pi->integral < pi->out_min) pi->integral = pi->out_min;
-
+  /* Tentative output (before integration update) */
   float out = pi->Kp * error + pi->integral;
+
+  /* Only integrate when NOT (saturated and error drives further) */
+  bool sat_high = (out >= pi->out_max);
+  bool sat_low  = (out <= pi->out_min);
+  if (!(sat_high && error > 0.0f) && !(sat_low && error < 0.0f))
+  {
+    pi->integral += pi->Ki * error;
+    if (pi->integral > pi->out_max) pi->integral = pi->out_max;
+    if (pi->integral < pi->out_min) pi->integral = pi->out_min;
+    out = pi->Kp * error + pi->integral;
+  }
+
   /* Output clamp */
   if (out > pi->out_max) out = pi->out_max;
   if (out < pi->out_min) out = pi->out_min;
@@ -162,6 +186,10 @@ static void SVM_Apply(float Valpha, float Vbeta)
   if (ccr_c < 1) ccr_c = 1;
   if (ccr_c > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_c = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
 
+  dbg_ccr1 = (uint32_t)ccr_a;
+  dbg_ccr2 = (uint32_t)ccr_b;
+  dbg_ccr3 = (uint32_t)ccr_c;
+
   LL_TIM_OC_SetCompareCH1(TIM1, (uint32_t)ccr_a);
   LL_TIM_OC_SetCompareCH2(TIM1, (uint32_t)ccr_b);
   LL_TIM_OC_SetCompareCH3(TIM1, (uint32_t)ccr_c);
@@ -190,7 +218,7 @@ void CFOC_Init(void)
   LL_ADC_ClearFlag_ADRDY(ADC2);
 
   /* ── Configure injected sequence + trigger via LL ──────────────────── */
-  /* ADC1: 2 ranks — ch3 (Phase A via OPAMP1), ch12 (Phase B via OPAMP2) */
+  /* ADC1: 2 ranks — ch3 (Phase U via OPAMP1), ch12 (Phase W via OPAMP3) */
   LL_ADC_INJ_ConfigQueueContext(ADC1,
       LL_ADC_INJ_TRIG_EXT_TIM1_TRGO,
       LL_ADC_INJ_TRIG_EXT_RISING,
@@ -199,7 +227,7 @@ void CFOC_Init(void)
       LL_ADC_CHANNEL_12,
       LL_ADC_CHANNEL_0, LL_ADC_CHANNEL_0);
 
-  /* ADC2: 2 ranks — VOPAMP3 (Phase C), ch3 */
+  /* ADC2: 2 ranks — VOPAMP3 (Phase W), ch3 (Phase V via OPAMP2) */
   LL_ADC_INJ_ConfigQueueContext(ADC2,
       LL_ADC_INJ_TRIG_EXT_TIM1_TRGO,
       LL_ADC_INJ_TRIG_EXT_RISING,
@@ -218,7 +246,18 @@ void CFOC_Init(void)
   LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
 
-  /* CC4 triggers ADC via TRGO=OC4REF — set near top of count */
+  /* CC4 triggers ADC via TRGO=OC4REF.
+   * CH4 is PWM2 mode: OC4REF=1 when counter >= CC4.
+   * In center-aligned mode, counter counts 0→ARR→0.
+   * We want to sample at the CENTER of the low-side ON-time,
+   * which is when the counter is near ARR (top of triangle).
+   * Set CC4 to (ARR - 1) so OC4REF rising edge triggers ADC
+   * at the top, where at least 2 of 3 low-side FETs are ON
+   * and shunt current is measurable.
+   *
+   * NOTE: With extreme duty cycles (CCR near 0 or near ARR),
+   * one phase may not have a measurable window — that's a
+   * Step 6 optimization (sector-dependent sampling). */
   LL_TIM_OC_SetCompareCH4(TIM1, CFOC_PWM_HALF_PERIOD - 1U);
 
   /* Enable PWM channel outputs (high-side + low-side for 3 phases) */
@@ -245,11 +284,21 @@ void CFOC_Init(void)
 void CFOC_HighFrequencyTask(void)
 {
   /* ── 1. Read phase currents from injected ADC ────────────────────────── */
-  /* ADC is left-aligned (12-bit << 4); shift right to get 0..4095 */
+  /* ADC is left-aligned (12-bit << 4); shift right to get 0..4095.
+   *
+   * B-G431B-ESC1 current sensing assignment (from .ioc):
+   *   Phase U → ADC1 CH3  (OPAMP1 output on PA2)
+   *   Phase V → ADC2 CH3  (OPAMP2 output on PA6) — different ADC!
+   *   Phase W → ADC1 CH12 (OPAMP3 output on PB1)
+   *
+   * We read Phase U (Ia) from ADC1 rank 1 and Phase V (Ib) from ADC2 rank 1.
+   * Phase W = -(Ia + Ib), reconstructed implicitly by Clarke transform. */
   int32_t raw_a = (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1) >> 4);
-  int32_t raw_b = (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_2) >> 4);
+  int32_t raw_b = (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC2, LL_ADC_INJ_RANK_2) >> 4);
+  dbg_raw_a = raw_a;
+  dbg_raw_b = raw_b;
 
-  /* ── Self-calibration: accumulate first N samples at zero current ───── */
+  /* ── Self-calibration: bootstrap first N samples at zero current ────── */
   if (!calib_done)
   {
     calib_sum_a += raw_a;
@@ -258,17 +307,24 @@ void CFOC_HighFrequencyTask(void)
 
     if (calib_count >= CFOC_CALIB_SAMPLES)
     {
-      adc_offset_a = calib_sum_a / (int32_t)CFOC_CALIB_SAMPLES;
-      adc_offset_b = calib_sum_b / (int32_t)CFOC_CALIB_SAMPLES;
+      adc_offset_a = (float)calib_sum_a / (float)CFOC_CALIB_SAMPLES;
+      adc_offset_b = (float)calib_sum_b / (float)CFOC_CALIB_SAMPLES;
       calib_done = 1U;
     }
     isr_count++;
     return;
   }
 
+  /* ── Continuous offset tracking: EMA while IDLE (zero current) ─────── */
+  if (cfoc_state == CFOC_IDLE)
+  {
+    adc_offset_a += CFOC_OFFSET_EMA_ALPHA * ((float)raw_a - adc_offset_a);
+    adc_offset_b += CFOC_OFFSET_EMA_ALPHA * ((float)raw_b - adc_offset_b);
+  }
+
   /* ── 2. Convert to Amps ─────────────────────────────────────────────── */
-  float Ia = (float)(adc_offset_a - raw_a) * CFOC_ADC_TO_AMPS;
-  float Ib = (float)(adc_offset_b - raw_b) * CFOC_ADC_TO_AMPS;
+  float Ia = (adc_offset_a - (float)raw_a) * CFOC_ADC_TO_AMPS;
+  float Ib = (adc_offset_b - (float)raw_b) * CFOC_ADC_TO_AMPS;
 
   /* ── 3. Clarke transform: (Ia, Ib) → (Iα, Iβ) ──────────────────────── */
   float Ialpha = Ia;
@@ -377,11 +433,11 @@ void CFOC_MediumFrequencyTask(void)
       ol_ramp_ms = 0U;
       cfoc_state = CFOC_OPEN_LOOP;
     }
-    return;
+    goto log_sample;
   }
 
   if (cfoc_state != CFOC_OPEN_LOOP)
-    return;
+    goto log_sample;
 
   ol_ramp_ms++;
 
@@ -400,6 +456,21 @@ void CFOC_MediumFrequencyTask(void)
 
   ol_Iq_ref = CFOC_OL_IQ_TARGET * iq_frac * (float)ol_direction;
   ol_Id_ref = CFOC_OL_ID_REF;
+
+log_sample:
+  /* ── Record one log entry per MF tick while active ─────────────────── */
+  if (cfoc_log_running && cfoc_log_idx < CFOC_LOG_SIZE)
+  {
+    uint32_t idx = cfoc_log_idx;
+    cfoc_log[idx].tick_ms   = (uint16_t)(HAL_GetTick() - log_start_tick);
+    cfoc_log[idx].state     = (uint8_t)cfoc_state;
+    cfoc_log[idx].Iq_x100   = (int16_t)(dbg_Iq * 100.0f);
+    cfoc_log[idx].Id_x100   = (int16_t)(dbg_Id * 100.0f);
+    cfoc_log[idx].Vq_x100   = (int16_t)(dbg_Vq * 100.0f);
+    cfoc_log[idx].Vd_x100   = (int16_t)(dbg_Vd * 100.0f);
+    cfoc_log[idx].theta_x10 = (int16_t)(ol_theta_e * (1800.0f / PI_F)); /* rad→deg×10 */
+    cfoc_log_idx = idx + 1U;
+  }
 }
 
 CFOC_State_t CFOC_GetState(void)
@@ -424,6 +495,11 @@ void CFOC_Start(int8_t direction)
   /* Reset PI integrators */
   PI_Reset(&pi_iq);
   PI_Reset(&pi_id);
+
+  /* Start debug log (overwrites previous capture) */
+  cfoc_log_idx     = 0U;
+  log_start_tick   = HAL_GetTick();
+  cfoc_log_running = 1U;
 
   /* Start with alignment: hold θ=0, push Id to lock rotor position */
   cfoc_state = CFOC_ALIGNMENT;

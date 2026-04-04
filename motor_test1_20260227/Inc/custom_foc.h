@@ -51,7 +51,10 @@ typedef enum {
 #define CFOC_PSI_F              9.75e-4f  /* PM flux linkage [Wb] */
 
 /* ── Calibration ─────────────────────────────────────────────────────────── */
-#define CFOC_CALIB_SAMPLES      64U  /* ADC samples for offset calibration */
+#define CFOC_CALIB_SAMPLES      64U      /* ADC samples for bootstrap offset */
+#define CFOC_OFFSET_EMA_ALPHA   0.002f   /* EMA smoothing for continuous offset
+                                          * tracking in IDLE. τ ≈ 1/α/f_pwm
+                                          * = 1/0.002/25000 = 20 ms */
 
 /* ── Alignment parameters ────────────────────────────────────────────────── */
 #define CFOC_ALIGN_MS           300U      /* Alignment duration [ms] */
@@ -85,6 +88,23 @@ typedef struct {
   float out_min;
   float out_max;
 } CFOC_PI_t;
+
+/* ── Debug log buffer (RAM ring, dumped via debugger) ────────────────────── */
+#define CFOC_LOG_SIZE  500U  /* 500 samples @ 1 kHz = 500 ms capture */
+
+typedef struct __attribute__((packed)) {
+  uint16_t tick_ms;     /* ms since CFOC_Start (wraps at 65535) */
+  uint8_t  state;       /* CFOC_State_t */
+  int16_t  Iq_x100;    /* measured Iq [A] × 100 */
+  int16_t  Id_x100;    /* measured Id [A] × 100 */
+  int16_t  Vq_x100;    /* PI output Vq [V] × 100 */
+  int16_t  Vd_x100;    /* PI output Vd [V] × 100 */
+  int16_t  theta_x10;  /* electrical angle [deg] × 10 */
+} CFOC_LogEntry_t;      /* 13 bytes per entry, 6.5 KB total */
+
+extern volatile CFOC_LogEntry_t cfoc_log[CFOC_LOG_SIZE];
+extern volatile uint32_t cfoc_log_idx;
+extern volatile uint8_t  cfoc_log_running;
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 

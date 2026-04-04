@@ -48,14 +48,22 @@ void SysTick_Handler(void)
   CFOC_MediumFrequencyTask();
 }
 
-/* ── User button (PC10) ──────────────────────────────────────────────────── */
+/* ── User button (PC10) — debounced toggle ──────────────────────────────── */
+
+static volatile uint32_t btn_last_tick = 0U;
+#define BTN_DEBOUNCE_MS  300U
 
 void EXTI15_10_IRQHandler(void)
 {
   if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_10))
   {
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);
-    /* Button press — toggle motor start/stop for Step 2 debug */
+
+    uint32_t now = HAL_GetTick();
+    if ((now - btn_last_tick) < BTN_DEBOUNCE_MS)
+      return;  /* bounce — ignore */
+    btn_last_tick = now;
+
     if (CFOC_GetState() == CFOC_IDLE)
       CFOC_Start(1);  /* forward */
     else
