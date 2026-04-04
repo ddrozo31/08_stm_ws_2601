@@ -125,9 +125,18 @@ void CFOC_Init(void)
   HAL_OPAMP_Start(&hopamp2);
   HAL_OPAMP_Start(&hopamp3);
 
-  /* Calibrate ADCs */
+  /* Calibrate ADCs (leaves ADC disabled internally) */
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
+
+  /* Re-enable ADCs after calibration — JADSTART requires ADEN=1 */
+  LL_ADC_Enable(ADC1);
+  while (!LL_ADC_IsActiveFlag_ADRDY(ADC1)) { /* wait */ }
+  LL_ADC_ClearFlag_ADRDY(ADC1);
+
+  LL_ADC_Enable(ADC2);
+  while (!LL_ADC_IsActiveFlag_ADRDY(ADC2)) { /* wait */ }
+  LL_ADC_ClearFlag_ADRDY(ADC2);
 
   /* Start PWM with 50% duty (zero voltage).
    * TIM1 starts counting, CC4 triggers ADC injected conversions.
