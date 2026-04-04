@@ -161,32 +161,43 @@ state machine with convergence checks, reliability counters, and speed FIFOs.
 
 ## 5. Implementation Steps (Detailed Roadmap)
 
-### Step 1: Bare ISR — Read Currents, Output Zero Voltage
+### Step 1: Bare ISR — Read Currents, Output Zero Voltage ✅ DONE (2026-04-03)
 
 **Goal:** TIM1 fires at 25 kHz, reads ADC injected channels, writes zero PWM.
 Motor doesn't move. Validates ISR timing and ADC readings.
 
-**Files to create:**
-- `motor_test1_20260227/Src/custom_foc.c` — ISR, state machine shell
-- `motor_test1_20260227/Inc/custom_foc.h` — public API
+**Files created/modified:**
+- `motor_test1_20260227/Src/custom_foc.c` — ISR, state machine shell, self-calibration
+- `motor_test1_20260227/Inc/custom_foc.h` — public API + hardware constants
+- `motor_test1_20260227/Src/stm32g4xx_mc_it.c` — ISR routing (ADC1_2, TIM1_UP, TIM1_BRK)
+- `motor_test1_20260227/Src/stm32_mc_common_it.c` — SysTick → MF task, USART2, HardFault
+- `motor_test1_20260227/Src/main.c` — `CFOC_Init()` replaces `MX_MotorControl_Init()`
+- `motor_test1_20260227/STM32CubeIDE/.project` — removed all MCSDK sources, added custom_foc.c
 
-**What to implement:**
-1. Register TIM1 Update callback (same as MCSDK does in MCboot)
-2. In ISR: read `ADC1->JDR1`, `ADC2->JDR1` for phase currents (Ia, Ib)
-3. Apply offset calibration (measure at startup with PWM off)
-4. Clarke transform: `Iα = Ia`, `Iβ = -(Ia + 2·Ib)/√3`
-5. Write 50% duty to TIM1 CCR1/2/3 (zero voltage in center-aligned)
-6. Toggle a GPIO for scope timing measurement
+**Hardware validation results (B-G431B-ESC1, AMORIL car):**
 
-**Hardware test:** Scope on GPIO — confirm 25 kHz, measure ISR duration.
-Read ADC values via debugger — should see ~2048 (mid-scale) with no current.
+| Metric | Expected | Measured | Status |
+|--------|----------|----------|--------|
+| ISR rate | 25 kHz | ~25 kHz (451k counts in ~18s) | ✅ |
+| adc_offset_a | ~2048 | 2532 | ✅ |
+| adc_offset_b | ~2048 | 1453 (OPAMP2 bias) | ✅ |
+| isr_Ialpha | ~0 A | -0.029 A | ✅ |
+| isr_Ibeta | ~0 A | 0.59 A (Phase B offset noise) | ⚠️ acceptable |
+| cfoc_state | CFOC_IDLE | CFOC_IDLE | ✅ |
 
-**Build approach:** 
-- Remove MCSDK `.c` files from STM32CubeIDE build (exclude from build, don't delete)
-- Add `custom_foc.c` and `esc_ekf_observer.c` to build
-- Keep `main.c` HAL init as-is
+**Key lessons learned (for future reference):**
+1. **HAL ADC state machine is incompatible with LL.** After `HAL_ADCEx_Calibration_Start`,
+   `HAL_ADCEx_InjectedStart` silently fails. Must use LL for ADC enable/JSQR/JADSTART.
+2. **ADC trigger source `TIM1_CH4` doesn't work** on this hardware config.
+   Use `TIM1_TRGO` instead (TRGO = OC4REF, configured in MX_TIM1_Init).
+3. **ADC is left-aligned** (configured by CubeMX). `LL_ADC_INJ_ReadConversionData12`
+   returns 16-bit left-aligned value — must `>> 4` for true 12-bit.
+4. **Self-calibration in ISR** avoids blocking polling loops. First 64 ISR calls
+   accumulate ADC samples, then compute offsets. No startup hang risk.
+5. **TIM2 slave-trigger mechanism** from MCSDK's `startTimers` doesn't work without
+   full R3_2_Init. Use `LL_TIM_EnableCounter(TIM1)` directly — safe at 50% duty.
 
-**Estimated new code:** ~80 lines
+**Actual new code:** ~200 lines (custom_foc.c) + ~60 lines (ISR routing)
 
 ---
 
@@ -346,18 +357,28 @@ The B-G431B-ESC1 uses 3-shunt current sensing through OPAMP1/2/3:
 - **Phase B:** ADC1 injected rank 2, channel 12 (OPAMP2 output)  
 - **Phase C:** ADC2 injected rank 1, VOPAMP3 internal channel
 
-Trigger: TIM1 CC4 rising edge (center of PWM ON-time).
+Trigger: TIM1 TRGO = OC4REF rising edge (center of PWM ON-time).
+**Note:** `TIM1_CH4` trigger source did not work; `TIM1_TRGO` works reliably.
 
-**Offset calibration:** With all PWM at 50% (zero voltage), read 16 ADC samples
-and average. This gives the zero-current ADC count (~2048 for 12-bit).
+**Offset calibration:** Self-calibrates inside the 25 kHz ISR — first 64 samples
+at 50% duty (zero current) are accumulated, then averaged. No blocking loops.
+Measured offsets: Phase A ≈ 2532, Phase B ≈ 1453 (OPAMP-dependent).
 
 **Current conversion:**
 ```c
-// ADC is 12-bit left-aligned → 16-bit value, divide by 16 for 12-bit
+// ADC is 12-bit left-aligned → must >> 4 for true 12-bit value
 // Current = (ADC_offset - ADC_raw) × (Vref / 4096) / (Rshunt × Gain)
-// B-G431B-ESC1: Rshunt = 0.003Ω, Gain = 14.07 (OPAMP configuration)
-// Scale factor: 3.3V / (4096 × 0.003 × 14.07) ≈ 0.01906 A/count
-#define ADC_TO_AMPS  (3.3f / (4096.0f * 0.003f * 14.07f))
+// B-G431B-ESC1: Rshunt = 0.003Ω, Gain = 9.14 (OPAMP PGA configuration)
+// Scale factor: 3.3V / (4096 × 0.003 × 9.14) ≈ 0.02938 A/count
+#define CFOC_ADC_TO_AMPS  (CFOC_VREF / (4096.0f * CFOC_RSHUNT * CFOC_AMP_GAIN))
+```
+
+**ADC init sequence (must use LL, not HAL):**
+```c
+HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);  // calibrate (disables ADC)
+LL_ADC_Enable(ADC1);                                      // re-enable via LL
+LL_ADC_INJ_ConfigQueueContext(ADC1, ...TIM1_TRGO...);    // configure JSQR
+LL_ADC_INJ_StartConversion(ADC1);                         // arm for trigger
 ```
 
 ### SVM (Space Vector Modulation)

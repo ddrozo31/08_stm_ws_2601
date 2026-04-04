@@ -10,7 +10,6 @@
 #include "custom_foc.h"
 #include "stm32g4xx_ll_tim.h"
 #include "stm32g4xx_ll_adc.h"
-#include "stm32g4xx_ll_bus.h"
 #include "stm32g4xx_ll_gpio.h"
 #include "stm32g4xx_hal.h"
 #include <math.h>
@@ -26,8 +25,14 @@ extern OPAMP_HandleTypeDef hopamp3;
 static volatile CFOC_State_t cfoc_state = CFOC_IDLE;
 
 /* ADC offset calibration (zero-current mid-point) */
-static int32_t adc_offset_a = 2048;  /* ADC1 injected rank 1 (Phase A) */
-static int32_t adc_offset_b = 2048;  /* ADC1 injected rank 2 (Phase B) */
+static volatile int32_t adc_offset_a = 2048;
+static volatile int32_t adc_offset_b = 2048;
+
+/* Self-calibration accumulators (run inside ISR for first N samples) */
+static volatile uint32_t calib_count = 0U;
+static volatile int32_t  calib_sum_a = 0;
+static volatile int32_t  calib_sum_b = 0;
+static volatile uint8_t  calib_done  = 0U;
 
 /* Measured currents in Amps (α-β frame), written by HF ISR */
 static volatile float isr_Ialpha = 0.0f;
@@ -36,47 +41,56 @@ static volatile float isr_Ibeta  = 0.0f;
 /* ISR cycle counter for diagnostics */
 static volatile uint32_t isr_count = 0U;
 
+
 /* 1/sqrt(3) for Clarke transform */
 #define INV_SQRT3  0.57735026919f
 
-/* ── ADC offset calibration ──────────────────────────────────────────────── */
+/* ── Public API ──────────────────────────────────────────────────────────── */
 
-/**
- * Calibrate ADC offsets with PWM at 50% (zero current).
- * Must be called AFTER TIM1 PWM is running but BEFORE motor moves.
- * Reads CFOC_CALIB_SAMPLES injected conversions and averages.
- */
-static void CFOC_CalibrateOffsets(void)
+void CFOC_Init(void)
 {
-  int32_t sum_a = 0;
-  int32_t sum_b = 0;
+  /* Start OPAMPs (current sense amplifiers) */
+  HAL_OPAMP_Start(&hopamp1);
+  HAL_OPAMP_Start(&hopamp2);
+  HAL_OPAMP_Start(&hopamp3);
 
-  /* Wait for a few PWM cycles to stabilize */
-  HAL_Delay(10);
+  /* Calibrate ADCs (internal offset calibration, leaves ADC disabled) */
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
 
-  for (uint32_t i = 0; i < CFOC_CALIB_SAMPLES; i++)
-  {
-    /* Wait for injected conversion complete (JEOS on ADC1) */
-    while (!LL_ADC_IsActiveFlag_JEOS(ADC1)) { /* spin */ }
-    LL_ADC_ClearFlag_JEOS(ADC1);
+  /* ── Enable ADCs with LL (bypass HAL state machine) ────────────────── */
+  LL_ADC_Enable(ADC1);
+  while (!LL_ADC_IsActiveFlag_ADRDY(ADC1)) { /* wait */ }
+  LL_ADC_ClearFlag_ADRDY(ADC1);
 
-    /* Read injected data: 12-bit left-aligned, shift right by 4 to get 0..4095 */
-    sum_a += (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1));
-    sum_b += (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_2));
-  }
+  LL_ADC_Enable(ADC2);
+  while (!LL_ADC_IsActiveFlag_ADRDY(ADC2)) { /* wait */ }
+  LL_ADC_ClearFlag_ADRDY(ADC2);
 
-  adc_offset_a = sum_a / (int32_t)CFOC_CALIB_SAMPLES;
-  adc_offset_b = sum_b / (int32_t)CFOC_CALIB_SAMPLES;
-}
+  /* ── Configure injected sequence + trigger via LL ──────────────────── */
+  /* ADC1: 2 ranks — ch3 (Phase A via OPAMP1), ch12 (Phase B via OPAMP2) */
+  LL_ADC_INJ_ConfigQueueContext(ADC1,
+      LL_ADC_INJ_TRIG_EXT_TIM1_TRGO,
+      LL_ADC_INJ_TRIG_EXT_RISING,
+      LL_ADC_INJ_SEQ_SCAN_ENABLE_2RANKS,
+      LL_ADC_CHANNEL_3,
+      LL_ADC_CHANNEL_12,
+      LL_ADC_CHANNEL_0, LL_ADC_CHANNEL_0);
 
-/* ── TIM1 PWM startup ───────────────────────────────────────────────────── */
+  /* ADC2: 2 ranks — VOPAMP3 (Phase C), ch3 */
+  LL_ADC_INJ_ConfigQueueContext(ADC2,
+      LL_ADC_INJ_TRIG_EXT_TIM1_TRGO,
+      LL_ADC_INJ_TRIG_EXT_RISING,
+      LL_ADC_INJ_SEQ_SCAN_ENABLE_2RANKS,
+      LL_ADC_CHANNEL_VOPAMP3_ADC2,
+      LL_ADC_CHANNEL_3,
+      LL_ADC_CHANNEL_0, LL_ADC_CHANNEL_0);
 
-/**
- * Start TIM1 PWM outputs and ADC injected triggers.
- * Uses TIM2 trigger for synchronized start (same as MCSDK startTimers).
- */
-static void CFOC_StartPWM(void)
-{
+  /* Arm both ADCs for external trigger (JADSTART) */
+  LL_ADC_INJ_StartConversion(ADC1);
+  LL_ADC_INJ_StartConversion(ADC2);
+
+  /* ── TIM1 setup ────────────────────────────────────────────────────── */
   /* Set all duty cycles to 50% (zero voltage in center-aligned mode) */
   LL_TIM_OC_SetCompareCH1(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
@@ -88,60 +102,15 @@ static void CFOC_StartPWM(void)
   /* Enable TIM1 outputs (MOE bit) */
   LL_TIM_EnableAllOutputs(TIM1);
 
-  /* Enable TIM1 update interrupt (for R3_2 sampling point reconfiguration
-   * — we keep this even though we don't use R3_2; the TIM1 UP ISR just
-   * clears the flag in Step 1) */
+  /* Enable TIM1 update interrupt */
   LL_TIM_EnableIT_UPDATE(TIM1);
 
-  /* Start ADC injected conversions (triggered by TIM1 CC4).
-   * Use HAL — it handles ADC enable + JSQR queue reload + JADSTART.
-   * Do NOT use _IT variant — calibration needs to poll JEOS first.
-   * The JEOS interrupt is enabled after calibration in CFOC_Init(). */
-  HAL_ADCEx_InjectedStart(&hadc1);
-  HAL_ADCEx_InjectedStart(&hadc2);
-
-  /* Synchronized start via TIM2 trigger (same technique as MCSDK) */
-  LL_TIM_SetTriggerInput(TIM1, LL_TIM_TS_ITR1);
-  LL_TIM_SetSlaveMode(TIM1, LL_TIM_SLAVEMODE_TRIGGER);
-
-  /* Enable TIM2 clock temporarily, fire update to trigger TIM1 */
-  uint32_t tim2_on = LL_APB1_GRP1_IsEnabledClock(LL_APB1_GRP1_PERIPH_TIM2);
-  if (!tim2_on)
-  {
-    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_TIM2);
-  }
-  LL_TIM_GenerateEvent_UPDATE(TIM2);
-  if (!tim2_on)
-  {
-    LL_APB1_GRP1_DisableClock(LL_APB1_GRP1_PERIPH_TIM2);
-  }
-}
-
-/* ── Public API ──────────────────────────────────────────────────────────── */
-
-void CFOC_Init(void)
-{
-  /* Start OPAMPs (current sense amplifiers) */
-  HAL_OPAMP_Start(&hopamp1);
-  HAL_OPAMP_Start(&hopamp2);
-  HAL_OPAMP_Start(&hopamp3);
-
-  /* Calibrate ADCs (leaves ADC disabled internally) */
-  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
-  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
-
-  /* Start PWM with 50% duty (zero voltage).
-   * HAL_ADCEx_InjectedStart (called inside CFOC_StartPWM) handles
-   * ADC enable + JSQR queue reload + JADSTART.
-   * TIM1 starts counting, CC4 triggers ADC injected conversions.
-   * JEOS interrupt is NOT enabled yet — calibration polls JEOS. */
-  CFOC_StartPWM();
-
-  /* Calibrate ADC offsets (zero current) — polls JEOS flag directly */
-  CFOC_CalibrateOffsets();
-
-  /* NOW enable JEOS interrupt on ADC2 — starts the 25 kHz FOC ISR */
+  /* Enable JEOS interrupt on ADC2 — the 25 kHz FOC ISR.
+   * Self-calibration happens inside the ISR for the first N samples. */
   LL_ADC_EnableIT_JEOS(ADC2);
+
+  /* Start TIM1 counter — CC4 match triggers ADC injected conversions */
+  LL_TIM_EnableCounter(TIM1);
 
   cfoc_state = CFOC_IDLE;
 }
@@ -149,19 +118,34 @@ void CFOC_Init(void)
 void CFOC_HighFrequencyTask(void)
 {
   /* ── 1. Read phase currents from injected ADC ────────────────────────── */
-  /* ADC1 injected rank 1 = Phase A (OPAMP1), rank 2 = Phase B (OPAMP2)
-   * Data is 12-bit left-aligned in JDR, use Data12 accessor for 0..4095 */
-  int32_t raw_a = (int32_t)LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1);
-  int32_t raw_b = (int32_t)LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_2);
+  /* ADC is left-aligned (12-bit << 4); shift right to get 0..4095 */
+  int32_t raw_a = (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_1) >> 4);
+  int32_t raw_b = (int32_t)(LL_ADC_INJ_ReadConversionData12(ADC1, LL_ADC_INJ_RANK_2) >> 4);
 
-  /* Convert to Amps: I = (offset - raw) × scale
-   * Sign convention: positive current = current flowing into motor */
+  /* ── Self-calibration: accumulate first N samples at zero current ───── */
+  if (!calib_done)
+  {
+    calib_sum_a += raw_a;
+    calib_sum_b += raw_b;
+    calib_count++;
+
+    if (calib_count >= CFOC_CALIB_SAMPLES)
+    {
+      adc_offset_a = calib_sum_a / (int32_t)CFOC_CALIB_SAMPLES;
+      adc_offset_b = calib_sum_b / (int32_t)CFOC_CALIB_SAMPLES;
+      calib_done = 1U;
+    }
+
+    /* During calibration, keep 50% duty and skip current calculation */
+    isr_count++;
+    return;
+  }
+
+  /* ── 2. Convert to Amps ─────────────────────────────────────────────── */
   float Ia = (float)(adc_offset_a - raw_a) * CFOC_ADC_TO_AMPS;
   float Ib = (float)(adc_offset_b - raw_b) * CFOC_ADC_TO_AMPS;
 
-  /* ── 2. Clarke transform: (Ia, Ib) → (Iα, Iβ) ──────────────────────── */
-  /* Iα = Ia
-   * Iβ = (Ia + 2·Ib) / √3  */
+  /* ── 3. Clarke transform: (Ia, Ib) → (Iα, Iβ) ──────────────────────── */
   float Ialpha = Ia;
   float Ibeta  = (Ia + 2.0f * Ib) * INV_SQRT3;
 
@@ -169,9 +153,7 @@ void CFOC_HighFrequencyTask(void)
   isr_Ialpha = Ialpha;
   isr_Ibeta  = Ibeta;
 
-  /* ── 3. Step 1: Output zero voltage (50% duty) ──────────────────────── */
-  /* In center-aligned mode, 50% of ARR = zero average voltage.
-   * All three phases at same duty → no current flows. */
+  /* ── 4. Step 1: Output zero voltage (50% duty) ──────────────────────── */
   LL_TIM_OC_SetCompareCH1(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
@@ -181,8 +163,7 @@ void CFOC_HighFrequencyTask(void)
 
 void CFOC_MediumFrequencyTask(void)
 {
-  /* Step 1: nothing to do at 1 kHz yet.
-   * Future steps add: open-loop ramp, EKF convergence check, speed PI. */
+  /* Step 1: nothing to do at 1 kHz yet. */
 }
 
 CFOC_State_t CFOC_GetState(void)
