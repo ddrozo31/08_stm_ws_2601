@@ -201,7 +201,7 @@ Motor doesn't move. Validates ISR timing and ADC readings.
 
 ---
 
-### Step 2: Open-Loop Startup — Ramp Angle + Current Injection
+### Step 2: Open-Loop Startup — Ramp Angle + Current Injection ✅ DONE (2026-04-04)
 
 **Goal:** Motor spins in open-loop at commanded speed. No observer feedback yet.
 
@@ -231,6 +231,24 @@ Motor doesn't move. Validates ISR timing and ADC readings.
 Record rosbag → `python3 tests/analyze_rosbag.py`
 
 **Estimated new code:** ~200 lines (PI + SVM + open-loop ramp)
+
+**Hardware validation results (B-G431B-ESC1, AMORIL car, 2026-04-04):**
+
+| Metric | Expected | Measured | Status |
+|--------|----------|----------|--------|
+| Alignment Id | 3.0 A | 3.1 A | ✅ |
+| Alignment Vd | ~0.3 V (R×I) | 0.34 V | ✅ |
+| Open-loop Iq | ramp to 5 A | ~1.9 A at t=500ms | ✅ (ramp in progress) |
+| PI saturation | no | Vq < 0.4 V | ✅ |
+| Motor spin | continuous | yes, wheel turns | ✅ |
+| Grinding noise | — | mild, expected (OL angle mismatch) | ⚠️ will fix in Step 3 |
+
+**Key bugs found during debug:**
+1. **Phase V on ADC2, not ADC1** — was reading Phase W instead of Phase V (zero current seen despite extreme PWM duty)
+2. **PI antiwindup** needed conditional integration (simple clamp insufficient)
+3. **Button bounce** on EXTI caused double start/stop
+
+**Debug tools created:** RAM log buffer (500 × 13B) + `tests/parse_cfoc_log.py` + GDB `dump binary memory`
 
 ---
 
