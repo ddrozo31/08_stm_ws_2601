@@ -93,12 +93,11 @@ static void CFOC_StartPWM(void)
    * clears the flag in Step 1) */
   LL_TIM_EnableIT_UPDATE(TIM1);
 
-  /* Start ADC injected conversions (triggered by TIM1 CC4) */
+  /* Start ADC injected conversions (triggered by TIM1 CC4).
+   * Do NOT enable JEOS interrupt yet — calibration needs to poll JEOS.
+   * The interrupt is enabled after calibration in CFOC_Init(). */
   LL_ADC_INJ_StartConversion(ADC1);
   LL_ADC_INJ_StartConversion(ADC2);
-
-  /* Enable JEOS interrupt on ADC2 — this fires the HF FOC ISR at 25 kHz */
-  LL_ADC_EnableIT_JEOS(ADC2);
 
   /* Synchronized start via TIM2 trigger (same technique as MCSDK) */
   LL_TIM_SetTriggerInput(TIM1, LL_TIM_TS_ITR1);
@@ -130,11 +129,16 @@ void CFOC_Init(void)
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
 
-  /* Start PWM with 50% duty (zero voltage) */
+  /* Start PWM with 50% duty (zero voltage).
+   * TIM1 starts counting, CC4 triggers ADC injected conversions.
+   * JEOS interrupt is NOT enabled yet — calibration polls JEOS. */
   CFOC_StartPWM();
 
-  /* Calibrate ADC offsets (zero current) */
+  /* Calibrate ADC offsets (zero current) — polls JEOS flag directly */
   CFOC_CalibrateOffsets();
+
+  /* NOW enable JEOS interrupt on ADC2 — starts the 25 kHz FOC ISR */
+  LL_ADC_EnableIT_JEOS(ADC2);
 
   cfoc_state = CFOC_IDLE;
 }
