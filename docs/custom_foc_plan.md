@@ -394,16 +394,62 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 
 ---
 
+### Step 5b: Ground Tuning & Runtime Config — DONE (2026-04-04)
+
+**Goal:** Reliable on-ground operation with runtime-tunable startup parameters.
+
+**Problems found during on-ground testing (5 rosbags, ~260s total):**
+
+1. **Speed saturation under load** — Speed PI saturated at 10A Iq clamp, limiting
+   ground speed to ~2500 RPM regardless of command above u=0.4.
+   Fix: runtime-configurable `iq_limit` (raised to 12A) and `max_speed_rpm` (lowered to 3000).
+
+2. **Joystick noise during startup → grinding** — Proportional stick during
+   ALIGNMENT→OPEN_LOOP→CROSSFADE caused varying speed target, disrupting field tracking.
+   Fix: two-phase control in ROS2 node — fixed `u_startup` during startup, proportional
+   only after CLOSED_LOOP (same pattern as old `esc_node_trigger.py`).
+
+3. **Open-loop grinding on ground** — Default startup (3A align, 5A OL, 3s ramp) too
+   weak for ground friction. Motor field slips against load during OL ramp.
+   Fix: runtime-configurable startup params. Ground-validated conservative profile:
+   align 700ms @ 6A, OL ramp 5000ms @ 10A. Consistent startup, no grinding.
+
+4. **Vbus hardcoded at 12V** — Implemented real ADC reading via ADC1 regular channel 1.
+   Status: IN REVIEW — reading needs validation on 3S LiPo (expected 9.0-12.6V).
+
+**Runtime config params (0xCC UART frames, sent by RPi5 at node startup):**
+
+| Param ID | Name | Encoding | Default (ground) | Range |
+|----------|------|----------|-------------------|-------|
+| 0x04 | max_speed_rpm | int16 RPM | 3000 | 1000-10000 |
+| 0x05 | iq_limit | int16 × 0.1A | 12.0A | 1.0-20.0A |
+| 0x06 | ol_iq | int16 × 0.1A | 8.0A | 2.0-15.0A |
+| 0x07 | ol_ramp_ms | int16 ms | 4000 | 1000-8000 |
+| 0x08 | align_ms | int16 ms | 500 | 100-2000 |
+| 0x09 | align_id | int16 × 0.1A | 5.0A | 1.0-15.0A |
+
+**Tested profiles:**
+
+| Profile | align | OL Iq | OL ramp | Startup time | Result |
+|---------|-------|-------|---------|-------------|--------|
+| Default | 300ms@3A | 5A | 3000ms | ~4.0s | Grinding on ground |
+| Ground | 500ms@5A | 8A | 4000ms | ~5.2s | Better, some grinding |
+| Conservative | 700ms@6A | 10A | 5000ms | ~6.4s | No grinding, consistent |
+
+---
+
 ### Step 6: Hardening & Optimization
 
 **Goal:** Production-ready firmware.
 
-- [ ] Add Motor Pilot debug mode (`#ifndef BUILD_ESC` → enable ASPEP for tuning)
+- [ ] Validate Vbus ADC reading on 3S LiPo (expect 9.0-12.6V)
 - [ ] CORDIC hardware sin/cos (replace `sincosf()` software call, saves ~20 cycles)
 - [ ] Overmodulation (OVM) for higher speed range
 - [ ] ADC sampling window optimization (sector-dependent, prevents distortion at high duty)
 - [ ] Test on HOSIM car (different motor parameters)
 - [ ] Reduce OBS_MINIMUM_SPEED_RPM: 1200 → 800 → 600 → 400
+- [ ] Odometry from wheel speed + IMU
+- [ ] ROS2 nav stack integration
 
 ---
 
