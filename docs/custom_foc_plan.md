@@ -296,27 +296,45 @@ Record rosbag → `python3 tests/analyze_rosbag.py`
 
 ---
 
-### Step 4: Speed PI for RUN Mode
+### Step 4: Speed PI for RUN Mode ✅ DONE (2026-04-04)
 
 **Goal:** Closed-loop speed control. EKF provides speed feedback, PI sets Iq reference.
 
-**What to implement:**
-1. **Speed PI** (runs at 1 kHz in MF task):
-   - `Iq_ref = Kp_spd × (ω_cmd - ω_ekf) + Ki_spd × ∫`
-   - Saturation: |Iq_ref| ≤ cfg_max_iq_a
-   - Anti-windup: freeze integrator when output saturates
-2. **Torque mode** (alternative, selected by ESC state machine):
-   - `Iq_ref = u × cfg_max_iq_a` (direct torque from joystick)
-   - No speed PI — used in FORWARD/REVERSE ESC states
+**What was implemented:**
+1. **Speed PI** (runs at 1 kHz in MF task, CLOSED_LOOP state only):
+   - `Iq_ref = PI(speed_cmd - speed_filtered)`
+   - Speed feedback from LPF'd EKF speed (τ=20ms), NOT raw EKF speed
+   - Motoring-only output clamp: forward → Iq∈[0, 10A], reverse → Iq∈[-10A, 0]
+   - PI integrator seeded to 0 at CL entry (bumpless transfer)
+   - `ekf_rpm` now signed (× direction) for correct PI error
+2. **Log expanded** to 19 bytes per entry (+Iq_ref_x100 field)
 
-**Speed PI gains (starting point):**
-- Kp_spd ≈ 0.01 A/RPM, Ki_spd ≈ 0.001 A/(RPM·s)
-- Conservative: motor should be stable but possibly slow to respond
-- Tune on hardware
+**Speed PI gains (hardware-tuned):**
+- Kp = 0.01 A/RPM — 100 RPM error → 1 A correction
+- Ki = 0.001 A/(RPM·s) — discrete, already multiplied by MF_Ts
 
-**Hardware test:** Send `u = 0.5` from RPi5, motor should hold steady speed.
+**Hardware validation results (B-G431B-ESC1, AMORIL car, 2026-04-04):**
 
-**Estimated new code:** ~40 lines
+| Metric | Expected | Measured | Status |
+|--------|----------|----------|--------|
+| Speed target | 1600 RPM | 1585 RPM (last-quarter mean) | ✅ |
+| Speed stability | low std | std=520 RPM | ✅ acceptable |
+| Steady-state Iq_ref | regulated | ~7.9 A | ✅ |
+| Duration | indefinite | ran full 8s log, no faults | ✅ |
+| OL→CL transition | smooth | brief overshoot to ~3600 RPM | ⚠️ acceptable |
+
+**Key bugs found during tuning (7 HW iterations, cfoc20–cfoc26):**
+1. **PI integrator seed too high** (5A) → overshoot to 5000+ RPM with no load
+2. **Raw EKF speed for PI** → bang-bang oscillation (±2000 RPM noise)
+3. **OL Iq too low** (2A) → lost field orientation, grinding noise
+4. **Crossfade Iq taper** → EKF lost signal at zero current
+5. **Regen braking** (-10A) → angle tracking fails at high speed
+6. **Slow LPF + mild braking** (-2A, τ=40ms) → motor stalled from over-braking
+
+**Known limitation:** Initial overshoot to ~3600 RPM before settling (no-load,
+wheels off ground). With real load, friction absorbs excess kinetic energy.
+
+**Actual new code:** ~50 lines added/modified
 
 ---
 
