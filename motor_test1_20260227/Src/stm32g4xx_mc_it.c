@@ -51,12 +51,12 @@ void TIM1_BRK_TIM15_IRQHandler(void)
   if (LL_TIM_IsActiveFlag_BRK(TIM1))
   {
     LL_TIM_ClearFlag_BRK(TIM1);
-    CFOC_Stop();  /* Overcurrent: PWM already disabled by hardware */
+    CFOC_FaultStop();  /* Overcurrent: PWM already disabled by hardware */
   }
 
   if (LL_TIM_IsActiveFlag_BRK2(TIM1))
   {
     LL_TIM_ClearFlag_BRK2(TIM1);
-    CFOC_Stop();  /* Overvoltage */
+    CFOC_FaultStop();  /* Overvoltage */
   }
 }

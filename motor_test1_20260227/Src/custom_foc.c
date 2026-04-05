@@ -116,6 +116,10 @@ static CFOC_PI_t pi_spd = {
 /* Speed command [RPM] — fixed for Step 4, external command in Step 5 */
 static volatile float spd_cmd_rpm = 0.0f;
 
+/* ── Torque mode (ESC sets Iq_ref directly, bypassing speed PI) ────────── */
+static volatile uint8_t cfoc_torque_mode = 0U;
+static volatile float   cfoc_torque_iq   = 0.0f;
+
 /* ── Inline helpers ─────────────────────────────────────────────────────── */
 
 /** Run PI controller with conditional-integration antiwindup.
@@ -614,15 +618,21 @@ void CFOC_MediumFrequencyTask(void)
     goto log_sample;
   }
 
-  /* ── CLOSED_LOOP: speed PI sets Iq_ref to hold commanded speed ──────── */
+  /* ── CLOSED_LOOP: torque mode (ESC) or speed PI (debug) ─────────────── */
   if (cfoc_state == CFOC_CLOSED_LOOP)
   {
-    /* Speed PI: Iq_ref = PI(speed_cmd - speed_measured)
-     * Use LPF'd speed (ekf_omega_filt) for smooth feedback.
-     * Raw ekf_rpm oscillates too much for stable control. */
-    float speed_filt_rpm = ekf_omega_filt / RPM_TO_ERAD_S;
-    float speed_err = spd_cmd_rpm - speed_filt_rpm;
-    ol_Iq_ref = PI_Run(&pi_spd, speed_err);
+    if (cfoc_torque_mode)
+    {
+      /* Torque mode: ESC sets Iq_ref directly via CFOC_SetTorque() */
+      ol_Iq_ref = cfoc_torque_iq;
+    }
+    else
+    {
+      /* Speed mode: PI(speed_cmd - speed_measured) */
+      float speed_filt_rpm = ekf_omega_filt / RPM_TO_ERAD_S;
+      float speed_err = spd_cmd_rpm - speed_filt_rpm;
+      ol_Iq_ref = PI_Run(&pi_spd, speed_err);
+    }
     ol_Id_ref = CFOC_OL_ID_REF;
     goto log_sample;
   }
@@ -682,6 +692,8 @@ void CFOC_Start(int8_t direction)
   pi_spd.out_min = -CFOC_PI_SPD_IQ_MAX;
   pi_spd.out_max =  CFOC_PI_SPD_IQ_MAX;
   spd_cmd_rpm = 0.0f;
+  cfoc_torque_mode = 0U;
+  cfoc_torque_iq   = 0.0f;
 
   /* Reset crossfade state */
   xf_dwell_ms = 0U;
@@ -712,7 +724,60 @@ void CFOC_Stop(void)
   PI_Reset(&pi_id);
   PI_Reset(&pi_spd);
 
+  /* Clear readback values so telemetry shows zero in IDLE */
+  dbg_Iq = 0.0f;
+  dbg_Id = 0.0f;
+  ekf_rpm = 0.0f;
+  ekf_omega_filt = 0.0f;
+  ol_omega_e = 0.0f;
+
   cfoc_state = CFOC_IDLE;
+}
+
+void CFOC_FaultStop(void)
+{
+  LL_TIM_OC_SetCompareCH1(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+  LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+  LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
+  PI_Reset(&pi_iq);
+  PI_Reset(&pi_id);
+  PI_Reset(&pi_spd);
+  dbg_Iq = 0.0f;
+  dbg_Id = 0.0f;
+  ekf_rpm = 0.0f;
+  ekf_omega_filt = 0.0f;
+  ol_omega_e = 0.0f;
+  cfoc_state = CFOC_FAULT;
+}
+
+void CFOC_AckFault(void)
+{
+  if (cfoc_state == CFOC_FAULT)
+    cfoc_state = CFOC_IDLE;
+}
+
+uint8_t CFOC_IsRunning(void)
+{
+  CFOC_State_t s = cfoc_state;
+  return (s >= CFOC_ALIGNMENT && s <= CFOC_CLOSED_LOOP) ? 1U : 0U;
+}
+
+void CFOC_SetTorque(float iq_ref)
+{
+  cfoc_torque_iq   = iq_ref;
+  cfoc_torque_mode = 1U;
+}
+
+void CFOC_SetSpeed(float rpm)
+{
+  spd_cmd_rpm      = rpm;
+  cfoc_torque_mode = 0U;
+}
+
+void CFOC_GetIqd(float *iq, float *id)
+{
+  if (iq) *iq = dbg_Iq;
+  if (id) *id = dbg_Id;
 }
 
 void CFOC_GetCurrents(float *ia, float *ib)
@@ -730,6 +795,6 @@ float CFOC_GetAngle(void)
 float CFOC_GetSpeedRPM(void)
 {
   if (cfoc_state == CFOC_CLOSED_LOOP || cfoc_state == CFOC_CROSSFADE)
-    return ekf_rpm;
+    return ekf_omega_filt / RPM_TO_ERAD_S;  /* filtered speed for stable telemetry */
   return ol_omega_e / RPM_TO_ERAD_S;
 }

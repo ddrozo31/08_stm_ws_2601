@@ -185,6 +185,29 @@ void CFOC_Start(int8_t direction);
 /** Command motor stop. */
 void CFOC_Stop(void);
 
+/** Emergency stop → CFOC_FAULT state (called from TIM1 BRK ISR). */
+void CFOC_FaultStop(void);
+
+/** Acknowledge fault: CFOC_FAULT → CFOC_IDLE. No-op if not in FAULT. */
+void CFOC_AckFault(void);
+
+/** Returns 1 if motor is active (ALIGNMENT through CLOSED_LOOP). */
+uint8_t CFOC_IsRunning(void);
+
+/** Set torque (Iq) reference directly, bypassing speed PI.
+ *  Activates torque mode — call every MF tick while in CLOSED_LOOP.
+ *  @param iq_ref  q-axis current [A], positive = forward torque. */
+void CFOC_SetTorque(float iq_ref);
+
+/** Set speed reference for speed PI mode.
+ *  @param rpm  target speed [RPM], signed (positive=forward). */
+void CFOC_SetSpeed(float rpm);
+
+/** Get measured d-q currents from most recent HF cycle.
+ *  @param[out] iq  q-axis current [A].
+ *  @param[out] id  d-axis current [A]. */
+void CFOC_GetIqd(float *iq, float *id);
+
 /** Get measured phase currents in Amps (α-β frame). */
 void CFOC_GetCurrents(float *ia, float *ib);
 

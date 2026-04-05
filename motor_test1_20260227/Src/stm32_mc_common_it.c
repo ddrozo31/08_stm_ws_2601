@@ -17,6 +17,7 @@
 
 #ifdef BUILD_ESC
 #include "esc_comm.h"
+#include "esc_app.h"
 #endif
 
 /* ── USART2 IRQ ──────────────────────────────────────────────────────────── */
@@ -46,6 +47,9 @@ void SysTick_Handler(void)
 {
   HAL_IncTick();
   CFOC_MediumFrequencyTask();
+#ifdef BUILD_ESC
+  ESC_APP_Tick();
+#endif
 }
 
 /* ── User button (PC10) — debounced toggle ──────────────────────────────── */
@@ -59,6 +63,8 @@ void EXTI15_10_IRQHandler(void)
   {
     LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_10);
 
+#ifndef BUILD_ESC
+    /* Debug mode: button toggles motor start/stop */
     uint32_t now = HAL_GetTick();
     if ((now - btn_last_tick) < BTN_DEBOUNCE_MS)
       return;  /* bounce — ignore */
@@ -68,5 +74,6 @@ void EXTI15_10_IRQHandler(void)
       CFOC_Start(1);  /* forward */
     else
       CFOC_Stop();
+#endif
   }
 }

@@ -34,7 +34,7 @@ import time
 import sys
 
 # -- Configuration -------------------------------------------------------------
-PORT      = 'COM4'
+PORT      = '/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066BFF494970535067242339-if02'   # RPi5: ST-Link VCP; Windows: 'COM4'
 BAUDRATE  = 1843200
 CMD_HZ    = 10          # command send rate (Hz) -- must be faster than 500 ms timeout
 
@@ -67,18 +67,18 @@ FAULT_BITS = {
 }
 
 
-# MCSDK internal state (MCI_State_t)
-MCSDK_STATE_NAMES = {
-    0:  'IDLE',
-    4:  'START',
-    6:  'RUN',
-    10: 'FAULT_NOW',
-    11: 'FAULT_OVER',
-    12: 'ICLWAIT',
+# CFOC_State_t (custom_foc.h) — sent in telemetry mc_st byte
+CFOC_STATE_NAMES = {
+    0: 'IDLE',
+    1: 'ALIGNMENT',
+    2: 'OPEN_LOOP',
+    3: 'CROSSFADE',
+    4: 'CLOSED_LOOP',
+    5: 'FAULT',
 }
 
-def decode_mcsdk_state(b: int) -> str:
-    return MCSDK_STATE_NAMES.get(b, f'MC_{b}')
+def decode_cfoc_state(b: int) -> str:
+    return CFOC_STATE_NAMES.get(b, f'CFOC_{b}')
 # -- Frame builders / decoders -------------------------------------------------
 
 def build_command(u: float) -> bytes:
@@ -116,7 +116,7 @@ def parse_telemetry(frame: bytes):
     u_val  = cmd_r / 32767.0
     return (speed, decode_state(frame[3]), decode_faults(frame[4]),
             u_val, vbus, iq_ma / 1000.0, id_ma / 1000.0,
-            decode_mcsdk_state(frame[13]))
+            decode_cfoc_state(frame[13]))
 
 # -- Background threads --------------------------------------------------------
 
@@ -166,11 +166,11 @@ def reader_thread(ser: serial.Serial, stop: threading.Event):
             if result is None:
                 buf.pop(0)
                 continue
-            speed, state, faults, u_val, vbus, iq_a, id_a, mc_st = result
+            speed, state, faults, u_val, vbus, iq_a, id_a, cfoc_st = result
             print(f"\r  [TLM]  spd={speed:6d} RPM  state={state:<14}"
                   f"  u={u_val:+.3f}  vbus={vbus:3d} V"
                   f"  iq={iq_a:+.3f}A  id={id_a:+.3f}A"
-                  f"  mc={mc_st}  faults={faults}",
+                  f"  cfoc={cfoc_st}  faults={faults}",
                   flush=True)
             buf = buf[TLM_FRAME_LEN:]
 

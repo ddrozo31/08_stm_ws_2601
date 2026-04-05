@@ -22,6 +22,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "custom_foc.h"
+#ifdef BUILD_ESC
+#include "esc_app.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -138,6 +141,9 @@ int main(void)
   MX_NVIC_Init();
   /* USER CODE BEGIN 2 */
   CFOC_Init();  /* Custom FOC: calibrate ADC, start PWM + ISRs */
+#ifdef BUILD_ESC
+  ESC_APP_Init();  /* ESC: enable UART RX, start ESC state machine */
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */

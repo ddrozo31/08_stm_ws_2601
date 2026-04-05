@@ -46,6 +46,11 @@
 			<locationURI>PARENT-1-PROJECT_LOC/Src/custom_foc.c</locationURI>
 		</link>
 		<link>
+			<name>Application/User/esc_app.c</name>
+			<type>1</type>
+			<locationURI>PARENT-1-PROJECT_LOC/Src/esc_app.c</locationURI>
+		</link>
+		<link>
 			<name>Application/User/esc_comm.c</name>
 			<type>1</type>
 			<locationURI>PARENT-1-PROJECT_LOC/Src/esc_comm.c</locationURI>
