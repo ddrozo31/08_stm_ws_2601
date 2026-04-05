@@ -338,25 +338,59 @@ wheels off ground). With real load, friction absorbs excess kinetic energy.
 
 ---
 
-### Step 5: ESC State Machine + UART Integration
+### Step 5: ESC State Machine + UART Integration — DONE (2026-04-04)
 
 **Goal:** Full ESC firmware — drop-in replacement for the MCSDK version.
 
-**What to implement:**
-1. **Integrate `esc_comm.c/h`** — already works, just wire to new state machine
-2. **ESC states** (same as `mc_app_hooks.c` but cleaner):
-   - BOOT → WAIT_NEUTRAL → READY → FORWARD/REVERSE → BRAKE → FAULT
-3. **Telemetry** — same 15-byte frame, sourced from our variables instead of MCSDK FOCVars
-4. **Safety:**
-   - Command timeout (500ms)
-   - Overcurrent via COMP1/2/4 hardware break (TIM1 BRK, already configured)
-   - EKF divergence detection (BEMF magnitude unreasonable for > 100ms → FAULT)
-   - Wrong-angle retry (speed sign mismatch)
+**What was implemented:**
 
-**Hardware test:** Full bench test with RPi5 commanding forward/reverse/neutral.
-Record rosbag → `python3 tests/analyze_rosbag.py`
+1. **New CFOC APIs** (`custom_foc.h/c`):
+   - `CFOC_SetSpeed(rpm)` — speed PI target (speed mode)
+   - `CFOC_SetTorque(iq_ref)` — direct torque mode (not used in final)
+   - `CFOC_GetIqd(*iq, *id)` — d-q current readback for telemetry
+   - `CFOC_AckFault()` — CFOC_FAULT → CFOC_IDLE transition
+   - `CFOC_IsRunning()` — true if ALIGNMENT..CLOSED_LOOP
+   - `CFOC_FaultStop()` — like Stop() but → CFOC_FAULT
 
-**Estimated new code:** ~150 lines (ESC state machine + telemetry)
+2. **ESC state machine** (`esc_app.c/h` — NEW files):
+   - States: BOOT → WAIT_NEUTRAL → READY → FORWARD/REVERSE → BRAKE → FAULT
+   - Speed mode: `CFOC_SetSpeed(u × 5000 RPM)` once CFOC reaches CLOSED_LOOP
+   - CFOC handles startup internally (ALIGNMENT → OPEN_LOOP → CROSSFADE)
+   - Wrong-angle detection + auto-restart with 500ms backoff
+   - 500ms command timeout → stop
+   - 10 Hz telemetry (15-byte frame: speed, states, faults, iq, id, vbus)
+
+3. **Wiring:**
+   - `main.c`: `ESC_APP_Init()` after `CFOC_Init()` under `BUILD_ESC`
+   - `SysTick`: `ESC_APP_Tick()` after `CFOC_MediumFrequencyTask()` under `BUILD_ESC`
+   - `BRK handler`: `CFOC_FaultStop()` instead of `CFOC_Stop()`
+   - Button: `#ifndef BUILD_ESC` guard (Debug-only)
+
+4. **ROS2 node** (`esc_node_custom_foc.py` in `zulu_esc` package):
+   - Joystick control: Hold RB + left stick Y
+   - Slew rate limiter (0.05/tick at 20 Hz)
+   - Publishes 8 topics: speed_rpm, state, cfoc_state, command, iq_ma, id_ma, vbus_v, faults
+
+**Hardware validation (3 iterations):**
+
+| Test | Mode | Result |
+|------|------|--------|
+| 01 (`esc_test.py`) | Torque | 3 bugs found: boost overshoot, stale telemetry, raw EKF noise |
+| 02 (`esc_test.py`) | Torque (fixed) | Smooth up to u=0.3, chunky/aggressive above — torque mode inherent |
+| 03 (ROS2 rosbag) | **Speed** | Smooth across full range, proportional: u=0.4→2000, u=0.7→3500, u=1.0→5000 RPM |
+
+**Key design decision — torque → speed mode:**
+Pure torque mode on a low-impedance motor (Rs=0.1Ω, Ls=10µH) is inherently aggressive
+above ~1600 RPM — excess Iq directly accelerates the rotor with no regulation. Speed mode
+with the existing PI controller (Step 4) naturally limits current to what's needed.
+
+**Rosbag validation (42.2s, 6484 messages, 423 telemetry frames):**
+- Forward: u=0.4→2000 RPM, u=0.7→3500 RPM, u=1.0→5000 RPM
+- Reverse: symmetric, negative RPM
+- Zero faults, clean state transitions (IDLE→ALIGNMENT→OPEN_LOOP→CROSSFADE→CLOSED_LOOP)
+- Telemetry: speed, iq, id all cleared correctly on stop (no stale values)
+
+**Actual new code:** ~250 lines (esc_app.c) + ~100 lines (CFOC API additions) + ~250 lines (ROS2 node)
 
 ---
 
