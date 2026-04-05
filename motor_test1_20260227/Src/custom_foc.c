@@ -839,11 +839,13 @@ float CFOC_GetVbusV(void)
   LL_ADC_ClearFlag_EOC(ADC1);   /* clear any stale EOC */
   LL_ADC_REG_StartConversion(ADC1);
   while (!LL_ADC_IsActiveFlag_EOC(ADC1)) { /* ~2µs */ }
-  uint16_t raw = LL_ADC_REG_ReadConversionData12(ADC1);
+  uint32_t raw = LL_ADC_REG_ReadConversionData32(ADC1);
   LL_ADC_ClearFlag_EOC(ADC1);
 
-  /* ADC is 12-bit left-aligned → ReadConversionData12 returns 16-bit, shift right 4.
-   * Voltage = (raw >> 4) / 4096 × Vref / divider_ratio */
-  float adc_volts = (float)(raw >> 4) * (CFOC_VREF / 4096.0f);
-  return adc_volts / CFOC_VBUS_RATIO;
+  /* ADC is 12-bit left-aligned: DR bits [15:4] = 12-bit result.
+   * Shift right 4 to get true 12-bit value (0-4095).
+   * Vadc = adc12 / 4096 × Vref,  Vbus = Vadc / divider_ratio
+   * B-G431B-ESC1 divider: R1=169k, R2=18k → ratio = 18/(169+18) = 0.0963 */
+  uint32_t adc12 = raw >> 4;
+  return (float)adc12 * (CFOC_VREF / (4096.0f * CFOC_VBUS_RATIO));
 }
