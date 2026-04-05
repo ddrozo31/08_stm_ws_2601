@@ -2,13 +2,13 @@
  * @file    custom_foc.c
  * @brief   Custom FOC motor control — replaces MCSDK motor control stack.
  *
- * Step 3: EKF crossfade — open-loop → closed-loop sensorless.
+ * Step 4: Speed PI controller for closed-loop speed regulation.
  *   HF (25 kHz): ADC read → Clarke → Park → PI(Iq,Id) → InvPark → SVM → PWM
- *   MF (1 kHz):  EKF update, crossfade logic, open-loop ramp, state machine
+ *   MF (1 kHz):  Speed PI, crossfade logic, open-loop ramp, state machine
  *
- * State flow: ALIGNMENT → OPEN_LOOP → CROSSFADE → CLOSED_LOOP
- * During OPEN_LOOP, the EKF runs in parallel. When BEMF magnitude is
- * large enough for 200ms, crossfade blends θ_OL → θ_EKF over 50ms.
+ * State flow: ALIGNMENT → OPEN_LOOP → CROSSFADE → CLOSED_LOOP (speed PI)
+ * EKF runs at 25 kHz in HF task. Speed crossfade blends ω_OL → ω_EKF.
+ * In CLOSED_LOOP, speed PI sets Iq_ref to hold commanded speed.
  */
 
 #include "custom_foc.h"
@@ -108,6 +108,13 @@ static CFOC_PI_t pi_id = {
   .Kp = CFOC_PI_ID_KP, .Ki = CFOC_PI_ID_KI,
   .integral = 0.0f, .out_min = -CFOC_PI_VMAX, .out_max = CFOC_PI_VMAX
 };
+static CFOC_PI_t pi_spd = {
+  .Kp = CFOC_PI_SPD_KP, .Ki = CFOC_PI_SPD_KI,
+  .integral = 0.0f, .out_min = -CFOC_PI_SPD_IQ_MAX, .out_max = CFOC_PI_SPD_IQ_MAX
+};
+
+/* Speed command [RPM] — fixed for Step 4, external command in Step 5 */
+static volatile float spd_cmd_rpm = 0.0f;
 
 /* ── Inline helpers ─────────────────────────────────────────────────────── */
 
@@ -481,7 +488,8 @@ void CFOC_HighFrequencyTask(void)
 
     EKF_Update(&ekf, Va_comp, Vb_comp, Ialpha, Ibeta);
     ekf_theta_e = EKF_GetAngle(&ekf);
-    float rpm = EKF_GetSpeedRPM(&ekf);
+    float rpm_mag = EKF_GetSpeedRPM(&ekf);  /* always positive */
+    float rpm = rpm_mag * (float)ol_direction;  /* apply direction sign */
     ekf_rpm     = rpm;
     float omega_raw = rpm * RPM_TO_ERAD_S;
     ekf_omega_e = omega_raw;
@@ -587,19 +595,34 @@ void CFOC_MediumFrequencyTask(void)
 
     if (xf_blend_ms >= CFOC_XF_DURATION_MS)
     {
-      /* Crossfade complete — fully EKF-driven */
+      /* Crossfade complete — fully EKF-driven.
+       * Clamp speed PI to motoring torque only (no regen braking).
+       * Braking at high speed with imperfect angle causes instability.
+       * Let friction coast the motor down when speed > target. */
+      if (ol_direction >= 0) {
+        pi_spd.out_min = 0.0f;
+        pi_spd.out_max = CFOC_PI_SPD_IQ_MAX;
+      } else {
+        pi_spd.out_min = -CFOC_PI_SPD_IQ_MAX;
+        pi_spd.out_max = 0.0f;
+      }
+      pi_spd.integral = 0.0f;
+      spd_cmd_rpm = CFOC_OL_TARGET_RPM * (float)ol_direction;
       cfoc_state = CFOC_CLOSED_LOOP;
     }
 
     goto log_sample;
   }
 
-  /* ── CLOSED_LOOP: EKF drives angle, Iq ref stays at target ─────────── */
+  /* ── CLOSED_LOOP: speed PI sets Iq_ref to hold commanded speed ──────── */
   if (cfoc_state == CFOC_CLOSED_LOOP)
   {
-    /* Keep current reference at open-loop target for now.
-     * Step 4 will add speed PI: Iq_ref = speed_PI(ω_cmd - ω_ekf). */
-    ol_Iq_ref = CFOC_OL_IQ_TARGET * (float)ol_direction;
+    /* Speed PI: Iq_ref = PI(speed_cmd - speed_measured)
+     * Use LPF'd speed (ekf_omega_filt) for smooth feedback.
+     * Raw ekf_rpm oscillates too much for stable control. */
+    float speed_filt_rpm = ekf_omega_filt / RPM_TO_ERAD_S;
+    float speed_err = spd_cmd_rpm - speed_filt_rpm;
+    ol_Iq_ref = PI_Run(&pi_spd, speed_err);
     ol_Id_ref = CFOC_OL_ID_REF;
     goto log_sample;
   }
@@ -627,6 +650,7 @@ log_sample:
     cfoc_log[idx].theta_x10    = (int16_t)(log_theta * (1800.0f / PI_F));
     cfoc_log[idx].ekf_theta_x10 = (int16_t)(ekf_theta_e * (1800.0f / PI_F));
     cfoc_log[idx].ekf_rpm      = (int16_t)ekf_rpm;
+    cfoc_log[idx].Iq_ref_x100  = (int16_t)(ol_Iq_ref * 100.0f);
     cfoc_log_idx = idx + 1U;
   }
 log_done: (void)0;
@@ -654,6 +678,10 @@ void CFOC_Start(int8_t direction)
   /* Reset PI integrators */
   PI_Reset(&pi_iq);
   PI_Reset(&pi_id);
+  PI_Reset(&pi_spd);
+  pi_spd.out_min = -CFOC_PI_SPD_IQ_MAX;
+  pi_spd.out_max =  CFOC_PI_SPD_IQ_MAX;
+  spd_cmd_rpm = 0.0f;
 
   /* Reset crossfade state */
   xf_dwell_ms = 0U;
@@ -682,6 +710,7 @@ void CFOC_Stop(void)
   /* Reset PI integrators */
   PI_Reset(&pi_iq);
   PI_Reset(&pi_id);
+  PI_Reset(&pi_spd);
 
   cfoc_state = CFOC_IDLE;
 }

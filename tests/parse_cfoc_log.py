@@ -7,7 +7,7 @@ Usage:
   2. Open Memory view, go to address of `cfoc_log` (find via Expressions).
   3. Right-click → Export Memory…
      - Start: address of cfoc_log
-     - Length: cfoc_log_idx × 17  (each entry is 17 bytes)
+     - Length: cfoc_log_idx × 19  (each entry is 19 bytes)
      - Format: Raw Binary
      - Save as: cfoc_dump.bin
   4. Run:  python3 tests/parse_cfoc_log.py cfoc_dump.bin
@@ -32,8 +32,9 @@ import os
 #   int16_t  theta_x10
 #   int16_t  ekf_theta_x10
 #   int16_t  ekf_rpm
-ENTRY_FMT = '<HBhhhhhhh'  # little-endian
-ENTRY_SIZE = struct.calcsize(ENTRY_FMT)  # 17 bytes
+#   int16_t  Iq_ref_x100
+ENTRY_FMT = '<HBhhhhhhhh'  # little-endian
+ENTRY_SIZE = struct.calcsize(ENTRY_FMT)  # 19 bytes
 
 STATE_NAMES = {
     0: 'IDLE',
@@ -51,7 +52,7 @@ def parse_binary(data):
     n = len(data) // ENTRY_SIZE
     for i in range(n):
         chunk = data[i * ENTRY_SIZE:(i + 1) * ENTRY_SIZE]
-        tick, state, iq, id_, vq, vd, theta, ekf_theta, ekf_rpm = struct.unpack(ENTRY_FMT, chunk)
+        tick, state, iq, id_, vq, vd, theta, ekf_theta, ekf_rpm, iq_ref = struct.unpack(ENTRY_FMT, chunk)
         entries.append({
             'tick_ms':  tick,
             'state':    STATE_NAMES.get(state, f'?{state}'),
@@ -62,6 +63,7 @@ def parse_binary(data):
             'theta_deg': theta / 10.0,
             'ekf_deg':  ekf_theta / 10.0,
             'ekf_rpm':  ekf_rpm,
+            'Iq_ref_A': iq_ref / 100.0,
         })
     return entries
 
@@ -82,11 +84,11 @@ def parse_hex_file(path):
 
 def print_table(entries):
     """Print entries as a formatted table."""
-    header = f"{'tick':>6}  {'state':<12} {'Iq(A)':>7} {'Id(A)':>7} {'Vq(V)':>7} {'Vd(V)':>7} {'θ(°)':>8} {'EKFθ(°)':>8} {'EKF RPM':>8}"
+    header = f"{'tick':>6}  {'state':<12} {'Iq(A)':>7} {'Iqref':>7} {'Id(A)':>7} {'Vq(V)':>7} {'Vd(V)':>7} {'θ(°)':>8} {'EKFθ(°)':>8} {'EKF RPM':>8}"
     print(header)
     print('-' * len(header))
     for e in entries:
-        print(f"{e['tick_ms']:>6}  {e['state']:<12} {e['Iq_A']:>7.2f} {e['Id_A']:>7.2f} "
+        print(f"{e['tick_ms']:>6}  {e['state']:<12} {e['Iq_A']:>7.2f} {e['Iq_ref_A']:>7.2f} {e['Id_A']:>7.2f} "
               f"{e['Vq_V']:>7.2f} {e['Vd_V']:>7.2f} {e['theta_deg']:>8.1f} "
               f"{e['ekf_deg']:>8.1f} {e['ekf_rpm']:>8}")
 
@@ -163,9 +165,18 @@ def print_summary(entries):
         duration = cl_entries[-1]['tick_ms'] - cl_entries[0]['tick_ms']
         rpms = [e['ekf_rpm'] for e in cl_entries]
         iqs = [abs(e['Iq_A']) for e in cl_entries]
+        iq_refs = [e['Iq_ref_A'] for e in cl_entries]
         print(f"\nClosed-loop duration: {duration} ms")
         print(f"  Speed: {min(rpms)}..{max(rpms)} RPM (mean={sum(rpms)/len(rpms):.0f})")
         print(f"  |Iq|: {min(iqs):.2f}..{max(iqs):.2f} A")
+        print(f"  Iq_ref: {min(iq_refs):.2f}..{max(iq_refs):.2f} A (speed PI output)")
+        # Settling: check if speed is within ±10% of final value in last 25% of CL
+        if len(cl_entries) > 20:
+            last_quarter = cl_entries[len(cl_entries)*3//4:]
+            lq_rpms = [e['ekf_rpm'] for e in last_quarter]
+            mean_rpm = sum(lq_rpms) / len(lq_rpms)
+            std_rpm = (sum((r - mean_rpm)**2 for r in lq_rpms) / len(lq_rpms)) ** 0.5
+            print(f"  Last-quarter speed: mean={mean_rpm:.0f} RPM, std={std_rpm:.0f} RPM")
     else:
         print("\n⚠ Never reached CLOSED_LOOP state!")
 

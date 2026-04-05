@@ -95,7 +95,7 @@ typedef enum {
  * τ = 20 ms filters the electrical-frequency oscillation (~53 Hz at 1600 RPM,
  * period 18.8 ms) by ~85%. Tracks speed changes on ~100 ms timescale.
  * α = Ts / (τ + Ts) = 40µs / 20.04ms ≈ 0.002 */
-#define CFOC_EKF_SPEED_LPF_ALPHA  0.002f
+#define CFOC_EKF_SPEED_LPF_ALPHA  0.002f    /* τ ≈ 20 ms */
 
 /* EKF tuning — process/measurement noise.
  * EKF now runs at 25 kHz (was 1 kHz). Process noise scales with Ts
@@ -105,7 +105,7 @@ typedef enum {
 #define CFOC_EKF_Q_E              1.33e-3f  /* BEMF process noise [V²]   (3.33e-2/25) */
 #define CFOC_EKF_R_I              3.33e-3f  /* Measurement noise [A²] (unchanged) */
 
-/* ── PI controller parameters ────────────────────────────────────────────── */
+/* ── Current PI controller parameters ────────────────────────────────────── */
 /*
  * Current PI bandwidth ωc ≈ 2π×1000 rad/s (1 kHz crossover):
  *   Kp = Ls × ωc = 10µH × 6283 = 0.063
@@ -118,6 +118,23 @@ typedef enum {
 #define CFOC_PI_ID_KI           0.025f
 #define CFOC_PI_VMAX            6.9f      /* Max voltage magnitude [V] */
 
+/* ── Speed PI controller parameters (Step 4) ────────────────────────────── */
+/*
+ * Speed PI runs at 1 kHz (MF task) in CLOSED_LOOP state.
+ * Output is Iq_ref [A].
+ *
+ * Conservative starting gains:
+ *   Kp = 0.01 A/RPM — 100 RPM error → 1 A correction
+ *   Ki = 0.001 A/(RPM·s) — already discretized (Ki_continuous × MF_Ts)
+ *        Ki_continuous = 1.0 A/(RPM·s), Ki_d = 1.0 × 0.001 = 0.001
+ *
+ * Speed command: fixed CFOC_OL_TARGET_RPM for now (1600 RPM).
+ * ESC integration (Step 5) will add external speed/torque commands.
+ */
+#define CFOC_PI_SPD_KP          0.01f     /* Speed Kp [A/RPM] */
+#define CFOC_PI_SPD_KI          0.001f    /* Speed Ki [A/RPM], discretized (× MF_Ts) */
+#define CFOC_PI_SPD_IQ_MAX      10.0f     /* Max |Iq_ref| from speed PI [A] */
+
 /* ── PI controller type ──────────────────────────────────────────────────── */
 typedef struct {
   float Kp;
@@ -128,8 +145,8 @@ typedef struct {
 } CFOC_PI_t;
 
 /* ── Debug log buffer (RAM ring, dumped via debugger) ────────────────────── */
-#define CFOC_LOG_SIZE  1000U  /* 1000 samples @ 1 kHz = 1.0 s capture
-                               * (17 KB; covers OL ramp start to crossfade) */
+#define CFOC_LOG_SIZE  1000U  /* 1000 samples @ 125 Hz = 8.0 s capture
+                               * (19 KB; covers OL ramp + crossfade + CL) */
 
 typedef struct __attribute__((packed)) {
   uint16_t tick_ms;      /* ms since CFOC_Start (wraps at 65535) */
@@ -140,8 +157,9 @@ typedef struct __attribute__((packed)) {
   int16_t  Vd_x100;     /* PI output Vd [V] × 100 */
   int16_t  theta_x10;   /* FOC angle (OL or blended) [deg] × 10 */
   int16_t  ekf_theta_x10; /* EKF estimated angle [deg] × 10 */
-  int16_t  ekf_rpm;      /* EKF estimated speed [RPM] */
-} CFOC_LogEntry_t;       /* 17 bytes per entry, 8.5 KB total */
+  int16_t  ekf_rpm;      /* EKF estimated speed [RPM] (signed) */
+  int16_t  Iq_ref_x100;  /* Iq reference from speed PI [A] × 100 */
+} CFOC_LogEntry_t;       /* 19 bytes per entry, 19 KB total */
 
 extern volatile CFOC_LogEntry_t cfoc_log[CFOC_LOG_SIZE];
 extern volatile uint32_t cfoc_log_idx;
