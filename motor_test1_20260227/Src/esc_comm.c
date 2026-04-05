@@ -42,6 +42,12 @@ static volatile uint8_t esc_cmd_fresh = 0U;
 static volatile float esc_cfg_max_iq_a   = -1.0f;
 static volatile float esc_cfg_revup_rpm  = -1.0f;
 static volatile float esc_cfg_boost_iq_a = -1.0f;
+static volatile float esc_cfg_max_spd_rpm = -1.0f;
+static volatile float esc_cfg_iq_limit_a  = -1.0f;
+static volatile float esc_cfg_ol_iq_a     = -1.0f;
+static volatile float esc_cfg_ol_ramp_ms  = -1.0f;
+static volatile float esc_cfg_align_ms    = -1.0f;
+static volatile float esc_cfg_align_id_a  = -1.0f;
 
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */
@@ -91,6 +97,24 @@ float ESC_COMM_GetRevupRPM(void) { return esc_cfg_revup_rpm; }
 
 /** @brief RUN-entry boost current (A) set by config frame, or -1 if not configured. */
 float ESC_COMM_GetBoostIqA(void) { return esc_cfg_boost_iq_a; }
+
+/** @brief Max speed RPM (u=1.0 maps to this), or -1 if not configured. */
+float ESC_COMM_GetMaxSpeedRPM(void) { return esc_cfg_max_spd_rpm; }
+
+/** @brief Speed PI Iq clamp (A), or -1 if not configured. */
+float ESC_COMM_GetIqLimitA(void) { return esc_cfg_iq_limit_a; }
+
+/** @brief Open-loop Iq target (A), or -1 if not configured. */
+float ESC_COMM_GetOlIqA(void) { return esc_cfg_ol_iq_a; }
+
+/** @brief OL speed ramp duration (ms), or -1 if not configured. */
+float ESC_COMM_GetOlRampMs(void) { return esc_cfg_ol_ramp_ms; }
+
+/** @brief Alignment duration (ms), or -1 if not configured. */
+float ESC_COMM_GetAlignMs(void) { return esc_cfg_align_ms; }
+
+/** @brief Alignment d-axis current (A), or -1 if not configured. */
+float ESC_COMM_GetAlignIdA(void) { return esc_cfg_align_id_a; }
 
 /* -------------------------------------------------------------------------- */
 /* Command accessors                                                           */
@@ -236,6 +260,54 @@ static void ESC_COMM_ProcessByte(uint8_t byte)
             if ((val >= 10) && (val <= 150))
             {
               esc_cfg_boost_iq_a = (float)val * 0.1f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_MAX_SPD)
+          {
+            /* val = int16_t RPM; valid range 1000–10000 */
+            if ((val >= 1000) && (val <= 10000))
+            {
+              esc_cfg_max_spd_rpm = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_IQ_LIMIT)
+          {
+            /* val = int16_t × 0.1 A; valid range 10–200 (1.0–20.0 A) */
+            if ((val >= 10) && (val <= 200))
+            {
+              esc_cfg_iq_limit_a = (float)val * 0.1f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_OL_IQ)
+          {
+            /* val = int16_t × 0.1 A; valid range 20–150 (2.0–15.0 A) */
+            if ((val >= 20) && (val <= 150))
+            {
+              esc_cfg_ol_iq_a = (float)val * 0.1f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_OL_RAMP)
+          {
+            /* val = int16_t ms; valid range 1000–8000 */
+            if ((val >= 1000) && (val <= 8000))
+            {
+              esc_cfg_ol_ramp_ms = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_ALIGN_MS)
+          {
+            /* val = int16_t ms; valid range 100–2000 */
+            if ((val >= 100) && (val <= 2000))
+            {
+              esc_cfg_align_ms = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_ALIGN_ID)
+          {
+            /* val = int16_t × 0.1 A; valid range 10–150 (1.0–15.0 A) */
+            if ((val >= 10) && (val <= 150))
+            {
+              esc_cfg_align_id_a = (float)val * 0.1f;
             }
           }
           /* Unknown param_id: silently ignore. */

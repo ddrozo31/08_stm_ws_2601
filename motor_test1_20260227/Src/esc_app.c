@@ -11,7 +11,7 @@
  * Control mode: speed mode.
  *   During startup (ALIGNMENT → OPEN_LOOP → CROSSFADE), CFOC manages
  *   its own current references internally. Once CFOC reaches CLOSED_LOOP,
- *   ESC sets speed target: speed_cmd = u × ESC_MAX_SPEED_RPM.
+ *   ESC sets speed target: speed_cmd = u × ESC_MAX_SPEED_RPM (runtime configurable).
  *   The speed PI in CFOC regulates Iq automatically.
  */
 
@@ -22,16 +22,19 @@
 #include "custom_foc.h"
 #include <math.h>
 
-/* ── Constants ──────────────────────────────────────────────────────────── */
+/* ── Constants (compile-time defaults, overridable via 0xCC config) ─────── */
 #define ESC_NEUTRAL_DEADBAND    0.02f     /* |u| below this = neutral */
-#define ESC_MAX_SPEED_RPM       5000.0f   /* |u|=1.0 maps to this speed [RPM] */
+#define ESC_DEFAULT_MAX_SPD_RPM 5000.0f   /* |u|=1.0 maps to this speed [RPM] */
+#define ESC_DEFAULT_IQ_LIMIT_A  10.0f     /* Speed PI Iq clamp [A] */
 #define ESC_TIMEOUT_MS          500U      /* No-command timeout → stop */
 #define ESC_RESTART_DELAY_MS    500U      /* Back-off between auto-restarts */
 #define ESC_TELEMETRY_EVERY     100U      /* Telemetry rate: 1000/100 = 10 Hz */
 #define ESC_WRONG_ANGLE_RPM     50.0f     /* Speed sign mismatch threshold */
 
-/* ── State ──────────────────────────────────────────────────────────────── */
+/* ── State ──────────��───────────────────────────────────────────────────── */
 static ESC_State_t  esc_state       = ESC_BOOT;
+static float        esc_max_spd_rpm = ESC_DEFAULT_MAX_SPD_RPM;
+static float        esc_iq_limit_a  = ESC_DEFAULT_IQ_LIMIT_A;
 static uint16_t     esc_timeout_ctr = 0U;
 static uint16_t     esc_tlm_ctr     = 0U;
 static uint16_t     esc_restart_dly = 0U;
@@ -67,7 +70,20 @@ void ESC_APP_Init(void)
 
 void ESC_APP_Tick(void)
 {
-  /* ── Read command ──────────────────────────────────────────────────── */
+  /* ── Apply runtime config (0xCC frames from RPi5) ─────────────────── */
+  {
+    float v;
+    v = ESC_COMM_GetMaxSpeedRPM();
+    if (v > 0.0f) esc_max_spd_rpm = v;
+
+    v = ESC_COMM_GetIqLimitA();
+    if (v > 0.0f) { esc_iq_limit_a = v; CFOC_SetIqLimit(v); }
+
+    CFOC_SetStartupParams(ESC_COMM_GetOlIqA(), ESC_COMM_GetOlRampMs(),
+                          ESC_COMM_GetAlignMs(), ESC_COMM_GetAlignIdA());
+  }
+
+  /* ── Read command ─────��─────────────────────────────��──────────────── */
   uint8_t new_cmd = ESC_COMM_HasNewCommand();
   int16_t raw     = ESC_COMM_GetCommand();
   float   u       = (float)raw / 32767.0f;
@@ -170,7 +186,7 @@ void ESC_APP_Tick(void)
       if (!esc_cl_entered)
         esc_cl_entered = 1U;
 
-      CFOC_SetSpeed(u * ESC_MAX_SPEED_RPM);
+      CFOC_SetSpeed(u * esc_max_spd_rpm);
     }
     break;
   }
@@ -219,7 +235,7 @@ void ESC_APP_Tick(void)
       if (!esc_cl_entered)
         esc_cl_entered = 1U;
 
-      CFOC_SetSpeed(u * ESC_MAX_SPEED_RPM);  /* u < 0 → negative speed */
+      CFOC_SetSpeed(u * esc_max_spd_rpm);  /* u < 0 → negative speed */
     }
     break;
   }

@@ -55,12 +55,24 @@
  *   ESC_CFG_PARAM_MAX_IQ    val = int16_t × 0.1 A  (e.g. 120 = 12.0 A, range 10–150)
  *   ESC_CFG_PARAM_REVUP     val = int16_t RPM        (range 1600–5000)
  *   ESC_CFG_PARAM_BOOST_IQ  val = int16_t × 0.1 A  (e.g. 120 = 12.0 A, range 10–150)
+ *   ESC_CFG_PARAM_MAX_SPD   val = int16_t RPM        (range 1000–10000)
+ *   ESC_CFG_PARAM_IQ_LIMIT  val = int16_t × 0.1 A  (e.g. 120 = 12.0 A, range 10–200)
+ *   ESC_CFG_PARAM_OL_IQ     val = int16_t × 0.1 A  (e.g. 80  = 8.0 A,  range 20–150)
+ *   ESC_CFG_PARAM_OL_RAMP   val = int16_t ms        (range 1000–8000)
+ *   ESC_CFG_PARAM_ALIGN_MS  val = int16_t ms        (range 100–2000)
+ *   ESC_CFG_PARAM_ALIGN_ID  val = int16_t × 0.1 A  (e.g. 50  = 5.0 A,  range 10–150)
  *
  * Config frames can be sent at any time; values take effect on the next motor start.
  * If a param is never configured, the firmware compile-time defaults are used. */
 #define ESC_CFG_PARAM_MAX_IQ    0x01U  /*!< Max torque current (Iq) */
 #define ESC_CFG_PARAM_REVUP     0x02U  /*!< Rev-up target speed     */
 #define ESC_CFG_PARAM_BOOST_IQ  0x03U  /*!< RUN-entry boost current */
+#define ESC_CFG_PARAM_MAX_SPD   0x04U  /*!< Max speed RPM (u=1.0 maps to this) */
+#define ESC_CFG_PARAM_IQ_LIMIT  0x05U  /*!< Speed PI Iq clamp [A × 0.1]       */
+#define ESC_CFG_PARAM_OL_IQ     0x06U  /*!< Open-loop Iq target [A × 0.1]     */
+#define ESC_CFG_PARAM_OL_RAMP   0x07U  /*!< OL speed ramp duration [ms]        */
+#define ESC_CFG_PARAM_ALIGN_MS  0x08U  /*!< Alignment duration [ms]            */
+#define ESC_CFG_PARAM_ALIGN_ID  0x09U  /*!< Alignment d-axis current [A × 0.1] */
 
 /* Initialise the layer and enable the USART2 RXNE interrupt. */
 void    ESC_COMM_Init(void);
@@ -89,6 +101,12 @@ void    ESC_COMM_SendTelemetry(int16_t speed_rpm, uint8_t state, uint8_t faults,
 float   ESC_COMM_GetMaxIqA(void);     /*!< Max torque current (A) or -1 if not set */
 float   ESC_COMM_GetRevupRPM(void);   /*!< Rev-up target speed (RPM) or -1 if not set */
 float   ESC_COMM_GetBoostIqA(void);   /*!< RUN-entry boost current (A) or -1 if not set */
+float   ESC_COMM_GetMaxSpeedRPM(void); /*!< Max speed RPM or -1 if not set */
+float   ESC_COMM_GetIqLimitA(void);    /*!< Speed PI Iq clamp (A) or -1 if not set */
+float   ESC_COMM_GetOlIqA(void);       /*!< OL Iq target (A) or -1 if not set */
+float   ESC_COMM_GetOlRampMs(void);    /*!< OL ramp duration (ms) or -1 if not set */
+float   ESC_COMM_GetAlignMs(void);     /*!< Alignment duration (ms) or -1 if not set */
+float   ESC_COMM_GetAlignIdA(void);    /*!< Alignment Id (A) or -1 if not set */
 
 /* Call from USART2_IRQHandler USER CODE BEGIN 0 -- processes one RXNE byte. */
 void    ESC_COMM_UART_RxISR(void);

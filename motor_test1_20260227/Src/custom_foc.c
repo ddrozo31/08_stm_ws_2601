@@ -120,6 +120,15 @@ static volatile float spd_cmd_rpm = 0.0f;
 static volatile uint8_t cfoc_torque_mode = 0U;
 static volatile float   cfoc_torque_iq   = 0.0f;
 
+/* ── Runtime Iq limit (overrides CFOC_PI_SPD_IQ_MAX if set) ──────────── */
+static volatile float cfoc_iq_limit = CFOC_PI_SPD_IQ_MAX;
+
+/* ── Runtime startup parameters (overridable via ESC 0xCC config) ────── */
+static volatile float  cfg_ol_iq_target = CFOC_OL_IQ_TARGET;
+static volatile uint32_t cfg_ol_ramp_ms = CFOC_OL_RAMP_MS;
+static volatile uint32_t cfg_align_ms   = CFOC_ALIGN_MS;
+static volatile float  cfg_align_id     = CFOC_ALIGN_ID;
+
 /* ── Inline helpers ─────────────────────────────────────────────────────── */
 
 /** Run PI controller with conditional-integration antiwindup.
@@ -380,12 +389,12 @@ void CFOC_HighFrequencyTask(void)
   if (cfoc_state == CFOC_ALIGNMENT)
   {
     /* Hold θ=0, push Id to lock rotor to d-axis.
-     * Ramp Id from 0 to CFOC_ALIGN_ID over first 100ms to avoid current spike. */
+     * Ramp Id from 0 to cfg_align_id over first 100ms to avoid current spike. */
     theta  = 0.0f;
     Iq_ref = 0.0f;
     float align_frac = (float)align_ms / 100.0f;
     if (align_frac > 1.0f) align_frac = 1.0f;
-    Id_ref = CFOC_ALIGN_ID * align_frac;
+    Id_ref = cfg_align_id * align_frac;
   }
   else if (cfoc_state == CFOC_OPEN_LOOP)
   {
@@ -510,7 +519,7 @@ void CFOC_MediumFrequencyTask(void)
   if (cfoc_state == CFOC_ALIGNMENT)
   {
     align_ms++;
-    if (align_ms >= CFOC_ALIGN_MS)
+    if (align_ms >= cfg_align_ms)
     {
       /* Rotor is aligned to θ=0 — begin open-loop ramp */
       ol_theta_e = 0.0f;
@@ -545,8 +554,8 @@ void CFOC_MediumFrequencyTask(void)
   {
     ol_ramp_ms++;
 
-    /* Speed ramp: 0 → target RPM over CFOC_OL_RAMP_MS */
-    float speed_frac = (float)ol_ramp_ms / (float)CFOC_OL_RAMP_MS;
+    /* Speed ramp: 0 → target RPM over cfg_ol_ramp_ms */
+    float speed_frac = (float)ol_ramp_ms / (float)cfg_ol_ramp_ms;
     if (speed_frac > 1.0f) speed_frac = 1.0f;
 
     float target_rpm = CFOC_OL_TARGET_RPM * speed_frac;
@@ -556,12 +565,12 @@ void CFOC_MediumFrequencyTask(void)
     float iq_frac = (float)ol_ramp_ms / (float)CFOC_OL_IQ_RAMP_MS;
     if (iq_frac > 1.0f) iq_frac = 1.0f;
 
-    ol_Iq_ref = CFOC_OL_IQ_TARGET * iq_frac * (float)ol_direction;
+    ol_Iq_ref = cfg_ol_iq_target * iq_frac * (float)ol_direction;
     ol_Id_ref = CFOC_OL_ID_REF;
 
     /* Crossfade trigger: wait for ramp to complete + dwell.
      * Speed crossfade doesn't need angle agreement — only speed source changes. */
-    if (ol_ramp_ms >= CFOC_OL_RAMP_MS)
+    if (ol_ramp_ms >= cfg_ol_ramp_ms)
     {
       xf_dwell_ms++;
       if (xf_dwell_ms >= CFOC_XF_DWELL_MS)
@@ -593,7 +602,7 @@ void CFOC_MediumFrequencyTask(void)
 
     /* Keep OL ramp running (speed/current don't change during crossfade) */
     ol_ramp_ms++;
-    float speed_frac = (float)ol_ramp_ms / (float)CFOC_OL_RAMP_MS;
+    float speed_frac = (float)ol_ramp_ms / (float)cfg_ol_ramp_ms;
     if (speed_frac > 1.0f) speed_frac = 1.0f;
     ol_omega_e = CFOC_OL_TARGET_RPM * speed_frac * RPM_TO_ERAD_S * (float)ol_direction;
 
@@ -605,9 +614,9 @@ void CFOC_MediumFrequencyTask(void)
        * Let friction coast the motor down when speed > target. */
       if (ol_direction >= 0) {
         pi_spd.out_min = 0.0f;
-        pi_spd.out_max = CFOC_PI_SPD_IQ_MAX;
+        pi_spd.out_max = cfoc_iq_limit;
       } else {
-        pi_spd.out_min = -CFOC_PI_SPD_IQ_MAX;
+        pi_spd.out_min = -cfoc_iq_limit;
         pi_spd.out_max = 0.0f;
       }
       pi_spd.integral = 0.0f;
@@ -689,8 +698,8 @@ void CFOC_Start(int8_t direction)
   PI_Reset(&pi_iq);
   PI_Reset(&pi_id);
   PI_Reset(&pi_spd);
-  pi_spd.out_min = -CFOC_PI_SPD_IQ_MAX;
-  pi_spd.out_max =  CFOC_PI_SPD_IQ_MAX;
+  pi_spd.out_min = -cfoc_iq_limit;
+  pi_spd.out_max =  cfoc_iq_limit;
   spd_cmd_rpm = 0.0f;
   cfoc_torque_mode = 0U;
   cfoc_torque_iq   = 0.0f;
@@ -772,6 +781,21 @@ void CFOC_SetSpeed(float rpm)
 {
   spd_cmd_rpm      = rpm;
   cfoc_torque_mode = 0U;
+}
+
+void CFOC_SetIqLimit(float iq_max)
+{
+  if (iq_max > 0.0f)
+    cfoc_iq_limit = iq_max;
+}
+
+void CFOC_SetStartupParams(float ol_iq_a, float ol_ramp_ms,
+                            float align_ms, float align_id_a)
+{
+  if (ol_iq_a > 0.0f)    cfg_ol_iq_target = ol_iq_a;
+  if (ol_ramp_ms > 0.0f)  cfg_ol_ramp_ms  = (uint32_t)ol_ramp_ms;
+  if (align_ms > 0.0f)    cfg_align_ms    = (uint32_t)align_ms;
+  if (align_id_a > 0.0f)  cfg_align_id    = align_id_a;
 }
 
 void CFOC_GetIqd(float *iq, float *id)

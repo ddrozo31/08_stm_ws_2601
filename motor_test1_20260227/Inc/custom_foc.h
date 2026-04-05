@@ -203,6 +203,15 @@ void CFOC_SetTorque(float iq_ref);
  *  @param rpm  target speed [RPM], signed (positive=forward). */
 void CFOC_SetSpeed(float rpm);
 
+/** Set the speed PI Iq output clamp at runtime.
+ *  @param iq_max  max |Iq_ref| [A]. Takes effect on next CFOC_Start(). */
+void CFOC_SetIqLimit(float iq_max);
+
+/** Set startup parameters at runtime (0 or negative = keep current value).
+ *  All take effect on next CFOC_Start(). */
+void CFOC_SetStartupParams(float ol_iq_a, float ol_ramp_ms,
+                            float align_ms, float align_id_a);
+
 /** Get measured d-q currents from most recent HF cycle.
  *  @param[out] iq  q-axis current [A].
  *  @param[out] id  d-axis current [A]. */
