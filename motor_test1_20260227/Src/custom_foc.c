@@ -828,7 +828,15 @@ float CFOC_GetVbusV(void)
   /* Single-shot regular conversion on ADC1 channel 1 (Vbus voltage divider).
    * Regular conversions are independent from injected (current sense) —
    * injected has higher priority and preempts regular if they overlap.
-   * Takes ~2µs at ADC clock / 47.5 cycle sampling time. */
+   *
+   * CubeMX configured 3 regular ranks (ch1, ch5, ch11) with scan mode.
+   * Without DMA, DR only holds the last rank — wrong channel.
+   * Fix: force single-rank sequence (just Vbus ch1) before each read.
+   * SQR registers are writable when ADSTART=0 (no conversion running). */
+  LL_ADC_REG_SetSequencerLength(ADC1, LL_ADC_REG_SEQ_SCAN_DISABLE);
+  LL_ADC_REG_SetSequencerRanks(ADC1, LL_ADC_REG_RANK_1, LL_ADC_CHANNEL_1);
+
+  LL_ADC_ClearFlag_EOC(ADC1);   /* clear any stale EOC */
   LL_ADC_REG_StartConversion(ADC1);
   while (!LL_ADC_IsActiveFlag_EOC(ADC1)) { /* ~2µs */ }
   uint16_t raw = LL_ADC_REG_ReadConversionData12(ADC1);
