@@ -226,4 +226,8 @@ float CFOC_GetAngle(void);
 /** Get estimated speed [RPM]. */
 float CFOC_GetSpeedRPM(void);
 
+/** Read DC bus voltage via ADC1 regular conversion.
+ *  Single-shot, ~2µs blocking. Call at low rate (e.g. 10 Hz). */
+float CFOC_GetVbusV(void);
+
 #endif /* CUSTOM_FOC_H */

@@ -822,3 +822,20 @@ float CFOC_GetSpeedRPM(void)
     return ekf_omega_filt / RPM_TO_ERAD_S;  /* filtered speed for stable telemetry */
   return ol_omega_e / RPM_TO_ERAD_S;
 }
+
+float CFOC_GetVbusV(void)
+{
+  /* Single-shot regular conversion on ADC1 channel 1 (Vbus voltage divider).
+   * Regular conversions are independent from injected (current sense) —
+   * injected has higher priority and preempts regular if they overlap.
+   * Takes ~2µs at ADC clock / 47.5 cycle sampling time. */
+  LL_ADC_REG_StartConversion(ADC1);
+  while (!LL_ADC_IsActiveFlag_EOC(ADC1)) { /* ~2µs */ }
+  uint16_t raw = LL_ADC_REG_ReadConversionData12(ADC1);
+  LL_ADC_ClearFlag_EOC(ADC1);
+
+  /* ADC is 12-bit left-aligned → ReadConversionData12 returns 16-bit, shift right 4.
+   * Voltage = (raw >> 4) / 4096 × Vref / divider_ratio */
+  float adc_volts = (float)(raw >> 4) * (CFOC_VREF / 4096.0f);
+  return adc_volts / CFOC_VBUS_RATIO;
+}
