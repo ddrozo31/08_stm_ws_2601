@@ -316,12 +316,13 @@ void CFOC_Init(void)
   LL_ADC_EnableIT_JEOS(ADC2);
 
   /* ── CORDIC: configure once for sin/cos at 25 kHz ─────────────────── */
-  /* Function=SINE, Precision=4 cycles (20-bit accuracy, <1ppm error —
-   * well beyond the 12-bit ADC floor), Scale=0, NARGS=1 (angle θ/π),
-   * NRES=2 (cos output first, then sin), 32-bit Q1.31 I/O. */
+  /* Function=COSINE: with this selection the CORDIC writes cos first then
+   * sin to RDATA (matches MCSDK mc_math.c convention). Precision=6 cycles
+   * (24 iterations ≈ 24-bit, ~24 clocks ≈ 140 ns at 170 MHz). Scale=0,
+   * NARGS=1 (angle θ/π), NRES=2, 32-bit Q1.31 I/O. */
   LL_CORDIC_Config(CORDIC,
-      LL_CORDIC_FUNCTION_SINE,
-      LL_CORDIC_PRECISION_4CYCLES,
+      LL_CORDIC_FUNCTION_COSINE,
+      LL_CORDIC_PRECISION_6CYCLES,
       LL_CORDIC_SCALE_0,
       LL_CORDIC_NBWRITE_1,
       LL_CORDIC_NBREAD_2,
@@ -463,12 +464,25 @@ void CFOC_HighFrequencyTask(void)
 
   /* ── 5. Park transform: (Iα, Iβ) → (Id, Iq) using θ_e ────────────── */
   /* Hardware CORDIC sin/cos: write θ/π as Q1.31, then read cos, sin.
-   * Latency: 4 iterations × 4 cycles = 16 clock cycles (~94 ns at 170 MHz).
-   * Output order with NRES=2: first read = cos(θ), second read = sin(θ).
-   * θ ∈ (−π, π] → θ/π ∈ (−1, 1]; cast to int32_t is safe for this range. */
+   * Latency: 6 iterations × 4 cycles = 24 clock cycles (~140 ns at 170 MHz).
+   * With FUNCTION_COSINE + NRES=2: first read = cos(θ), second read = sin(θ).
+   * θ ∈ (−π, π] → θ/π ∈ (−1, 1]. The +π edge maps to +2³¹ which saturates
+   * to INT32_MAX in VCVT.S32.F32 — equivalent to π·(1−2⁻³¹), harmless.
+   *
+   * Re-issue CSR config every tick (single MMIO store, ~1 cycle): defensive
+   * in case some MCSDK background path (MCM_Sqrt / Circle_Limitation in fault
+   * handling) reprograms CORDIC between FOC ISR ticks. */
+  LL_CORDIC_Config(CORDIC,
+      LL_CORDIC_FUNCTION_COSINE,
+      LL_CORDIC_PRECISION_6CYCLES,
+      LL_CORDIC_SCALE_0,
+      LL_CORDIC_NBWRITE_1,
+      LL_CORDIC_NBREAD_2,
+      LL_CORDIC_INSIZE_32BITS,
+      LL_CORDIC_OUTSIZE_32BITS);
   LL_CORDIC_WriteData(CORDIC,
       (uint32_t)(int32_t)(theta * (1.0f / (float)M_PI) * 2147483648.0f));
-  while (!LL_CORDIC_IsActiveFlag_RRDY(CORDIC)) { /* 16 cycles max */ }
+  while (!LL_CORDIC_IsActiveFlag_RRDY(CORDIC)) { /* ~24 cycles */ }
   float cos_th = (float)(int32_t)LL_CORDIC_ReadData(CORDIC) * (1.0f / 2147483648.0f);
   float sin_th = (float)(int32_t)LL_CORDIC_ReadData(CORDIC) * (1.0f / 2147483648.0f);
 
