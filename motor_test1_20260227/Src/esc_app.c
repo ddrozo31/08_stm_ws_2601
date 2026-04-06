@@ -51,7 +51,7 @@ static void esc_send_telemetry(float u)
   uint8_t  esc_st  = (uint8_t)esc_state;
   uint8_t  fault_b = (CFOC_GetState() == CFOC_FAULT) ? 0x01U : 0x00U;
   int16_t  cmd_raw = ESC_COMM_GetCommand();
-  uint16_t vbus_v  = (uint16_t)(CFOC_GetVbusV() + 0.5f);
+  uint16_t vbus_v  = (uint16_t)(CFOC_GetVbusV() * 10.0f + 0.5f); /* tenths of V, e.g. 126 = 12.6V */
   int16_t  iq_ma   = (int16_t)(iq * 1000.0f);
   int16_t  id_ma   = (int16_t)(id * 1000.0f);
   uint8_t  cfoc_st = (uint8_t)CFOC_GetState();

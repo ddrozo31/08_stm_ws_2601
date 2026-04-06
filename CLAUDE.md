@@ -55,7 +55,7 @@ Two files own USART2 exclusively — ASPEP/MCP is disabled:
 
 **Telemetry frame (STM32 → RPi5, 15 bytes):** `[0xBB][spd_lo][spd_hi][esc_st][faults][u_lo][u_hi][v_lo][v_hi][iq_lo][iq_hi][id_lo][id_hi][mc_st][XOR_chk]`
 - `speed` = `int16_t` RPM, `esc_st` = ESC_State_t byte, `faults` = lower byte of fault bitmask
-- `u` = `int16_t` raw command (−32768..+32767), `v` = `uint16_t` DC bus voltage in Volts
+- `u` = `int16_t` raw command (−32768..+32767), `v` = `uint16_t` DC bus voltage in tenths of Volts (e.g. 126 = 12.6 V)
 - `iq_ma` = `int16_t` q-axis actual current in mA, `id_ma` = `int16_t` d-axis current in mA
 - `mc_st` = `uint8_t` MCSDK internal state (IDLE=0, START=4, RUN=6, ANY_STOP=8, SWITCH_OVER=19, etc.)
 

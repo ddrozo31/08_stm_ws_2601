@@ -847,5 +847,8 @@ float CFOC_GetVbusV(void)
    * Vadc = adc12 / 4096 × Vref,  Vbus = Vadc / divider_ratio
    * B-G431B-ESC1 divider: R1=169k, R2=18k → ratio = 18/(169+18) = 0.0963 */
   uint32_t adc12 = raw >> 4;
-  return (float)adc12 * (CFOC_VREF / (4096.0f * CFOC_VBUS_RATIO));
+  float v = (float)adc12 * (CFOC_VREF / (4096.0f * CFOC_VBUS_RATIO));
+  /* Clamp: below 6V the Vbus sense pin is floating (no battery connected).
+   * A 2S LiPo fully discharged cutoff is ~6V; anything lower is invalid. */
+  return (v < 6.0f) ? 0.0f : v;
 }
