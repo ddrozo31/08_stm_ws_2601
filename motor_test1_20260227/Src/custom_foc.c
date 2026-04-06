@@ -16,6 +16,7 @@
 #include "stm32g4xx_ll_tim.h"
 #include "stm32g4xx_ll_adc.h"
 #include "stm32g4xx_ll_gpio.h"
+#include "stm32g4xx_ll_cordic.h"
 #include "stm32g4xx_hal.h"
 #include <math.h>
 #include <stdbool.h>
@@ -70,8 +71,9 @@ static volatile uint32_t align_ms   = 0U;    /* MF tick counter during ALIGNMENT
 static EKF_Handle_t ekf;
 static volatile float ekf_theta_e = 0.0f;  /* EKF angle, copied to HF-accessible var */
 static volatile float ekf_omega_e = 0.0f;      /* EKF electrical speed [rad/s] (raw) */
-static volatile float ekf_omega_filt = 0.0f;  /* Low-pass filtered speed for angle integration */
-static volatile float ekf_rpm     = 0.0f;      /* EKF speed for telemetry */
+static volatile float ekf_omega_filt = 0.0f;  /* τ=20ms LPF — angle integration + telemetry */
+static volatile float ekf_omega_pi   = 0.0f;  /* τ=100ms LPF — speed PI feedback only */
+static volatile float ekf_rpm        = 0.0f;  /* EKF speed for telemetry */
 
 /* ── Crossfade state ────────────────────────────────────────────────────── */
 static volatile uint32_t xf_dwell_ms = 0U;    /* How long BEMF > threshold */
@@ -122,6 +124,10 @@ static volatile float   cfoc_torque_iq   = 0.0f;
 
 /* ── Runtime Iq limit (overrides CFOC_PI_SPD_IQ_MAX if set) ──────────── */
 static volatile float cfoc_iq_limit = CFOC_PI_SPD_IQ_MAX;
+
+/* ── Runtime dead-time voltage (updated from measured Vbus every 100ms) ── */
+/* Vdt = Vbus × CFOC_VDT_PER_VBUS; initialised to 12V nominal. */
+static volatile float cfoc_vdt_rt = 12.0f * CFOC_VDT_PER_VBUS;
 
 /* ── Runtime startup parameters (overridable via ESC 0xCC config) ────── */
 static volatile float  cfg_ol_iq_target = CFOC_OL_IQ_TARGET;
@@ -309,6 +315,19 @@ void CFOC_Init(void)
   /* Enable JEOS interrupt on ADC2 — the 25 kHz FOC ISR */
   LL_ADC_EnableIT_JEOS(ADC2);
 
+  /* ── CORDIC: configure once for sin/cos at 25 kHz ─────────────────── */
+  /* Function=SINE, Precision=4 cycles (20-bit accuracy, <1ppm error —
+   * well beyond the 12-bit ADC floor), Scale=0, NARGS=1 (angle θ/π),
+   * NRES=2 (cos output first, then sin), 32-bit Q1.31 I/O. */
+  LL_CORDIC_Config(CORDIC,
+      LL_CORDIC_FUNCTION_SINE,
+      LL_CORDIC_PRECISION_4CYCLES,
+      LL_CORDIC_SCALE_0,
+      LL_CORDIC_NBWRITE_1,
+      LL_CORDIC_NBREAD_2,
+      LL_CORDIC_INSIZE_32BITS,
+      LL_CORDIC_OUTSIZE_32BITS);
+
   /* Start TIM1 counter */
   LL_TIM_EnableCounter(TIM1);
 
@@ -443,9 +462,15 @@ void CFOC_HighFrequencyTask(void)
   }
 
   /* ── 5. Park transform: (Iα, Iβ) → (Id, Iq) using θ_e ────────────── */
-  float sin_th, cos_th;
-  sin_th = sinf(theta);
-  cos_th = cosf(theta);
+  /* Hardware CORDIC sin/cos: write θ/π as Q1.31, then read cos, sin.
+   * Latency: 4 iterations × 4 cycles = 16 clock cycles (~94 ns at 170 MHz).
+   * Output order with NRES=2: first read = cos(θ), second read = sin(θ).
+   * θ ∈ (−π, π] → θ/π ∈ (−1, 1]; cast to int32_t is safe for this range. */
+  LL_CORDIC_WriteData(CORDIC,
+      (uint32_t)(int32_t)(theta * (1.0f / (float)M_PI) * 2147483648.0f));
+  while (!LL_CORDIC_IsActiveFlag_RRDY(CORDIC)) { /* 16 cycles max */ }
+  float cos_th = (float)(int32_t)LL_CORDIC_ReadData(CORDIC) * (1.0f / 2147483648.0f);
+  float sin_th = (float)(int32_t)LL_CORDIC_ReadData(CORDIC) * (1.0f / 2147483648.0f);
 
   float Id =  cos_th * Ialpha + sin_th * Ibeta;
   float Iq = -sin_th * Ialpha + cos_th * Ibeta;
@@ -495,7 +520,7 @@ void CFOC_HighFrequencyTask(void)
     float Ic = -(Ia + Ib);
     float sc = Ic / (fabsf(Ic) + I_thresh);
 
-    float Vdt = CFOC_VDT;
+    float Vdt = cfoc_vdt_rt; /* updated from measured Vbus every 100ms in MF task */
     float Va_comp = Valpha + Vdt * (2.0f / 3.0f) * (sa - 0.5f * sb - 0.5f * sc);
     float Vb_comp = Vbeta  + Vdt * INV_SQRT3     * (sb - sc);
 
@@ -506,8 +531,10 @@ void CFOC_HighFrequencyTask(void)
     ekf_rpm     = rpm;
     float omega_raw = rpm * RPM_TO_ERAD_S;
     ekf_omega_e = omega_raw;
-    /* LPF on speed for angle integration (τ ≈ 5 ms, filters ~53 Hz noise) */
-    ekf_omega_filt += CFOC_EKF_SPEED_LPF_ALPHA * (omega_raw - ekf_omega_filt);
+    /* τ=20ms LPF — angle integration and telemetry */
+    ekf_omega_filt += CFOC_EKF_SPEED_LPF_ALPHA  * (omega_raw - ekf_omega_filt);
+    /* τ=100ms LPF — speed PI feedback (smoother, less noise-driven Iq chattering) */
+    ekf_omega_pi   += CFOC_EKF_SPD_PI_LPF_ALPHA * (omega_raw - ekf_omega_pi);
   }
 
   isr_count++;
@@ -515,6 +542,17 @@ void CFOC_HighFrequencyTask(void)
 
 void CFOC_MediumFrequencyTask(void)
 {
+  /* ── Update dead-time voltage from measured Vbus (every 100 ms) ─────── */
+  /* Vbus changes on a seconds timescale (battery discharge); 100ms is plenty.
+   * CFOC_GetVbusV() does a blocking regular ADC conversion (~2µs). */
+  static uint16_t vbus_update_ctr = 0U;
+  if (++vbus_update_ctr >= 100U)
+  {
+    vbus_update_ctr = 0U;
+    float v = CFOC_GetVbusV();
+    if (v > 0.0f)  cfoc_vdt_rt = v * CFOC_VDT_PER_VBUS;
+  }
+
   /* ── ALIGNMENT phase: wait for rotor to lock, then transition ──────── */
   if (cfoc_state == CFOC_ALIGNMENT)
   {
@@ -637,8 +675,10 @@ void CFOC_MediumFrequencyTask(void)
     }
     else
     {
-      /* Speed mode: PI(speed_cmd - speed_measured) */
-      float speed_filt_rpm = ekf_omega_filt / RPM_TO_ERAD_S;
+      /* Speed mode: PI(speed_cmd - speed_measured).
+       * Use ekf_omega_pi (τ=100ms LPF) — smoother than ekf_omega_filt (τ=20ms),
+       * reduces noise-driven Iq chattering without affecting angle integration. */
+      float speed_filt_rpm = ekf_omega_pi / RPM_TO_ERAD_S;
       float speed_err = spd_cmd_rpm - speed_filt_rpm;
       ol_Iq_ref = PI_Run(&pi_spd, speed_err);
     }
@@ -711,6 +751,7 @@ void CFOC_Start(int8_t direction)
   ekf_theta_e   = 0.0f;
   ekf_omega_e   = 0.0f;
   ekf_omega_filt = 0.0f;
+  ekf_omega_pi   = 0.0f;
   ekf_rpm       = 0.0f;
 
   /* Debug log starts at OPEN_LOOP entry (not alignment) to capture crossfade */
@@ -738,6 +779,7 @@ void CFOC_Stop(void)
   dbg_Id = 0.0f;
   ekf_rpm = 0.0f;
   ekf_omega_filt = 0.0f;
+  ekf_omega_pi   = 0.0f;
   ol_omega_e = 0.0f;
 
   cfoc_state = CFOC_IDLE;
@@ -755,6 +797,7 @@ void CFOC_FaultStop(void)
   dbg_Id = 0.0f;
   ekf_rpm = 0.0f;
   ekf_omega_filt = 0.0f;
+  ekf_omega_pi   = 0.0f;
   ol_omega_e = 0.0f;
   cfoc_state = CFOC_FAULT;
 }

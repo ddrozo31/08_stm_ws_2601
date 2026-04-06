@@ -56,7 +56,9 @@ typedef enum {
  * Vdt = Vbus × 2×Tdt_edge / Tpwm = 12 × 2×400ns / 40µs = 0.24V
  * BEMF at 1600 RPM = 0.33V → Vdt is 73% of BEMF (significant). */
 #define CFOC_DEAD_TIME_NS       800U
-#define CFOC_VDT                (12.0f * (float)CFOC_DEAD_TIME_NS * 1e-9f / CFOC_TS)
+/* Vdt = Vbus × 2×Tdt_edge / Tpwm. The per-Vbus factor is constant;
+ * actual Vdt is computed at runtime using measured Vbus (updated every 100ms). */
+#define CFOC_VDT_PER_VBUS       ((float)CFOC_DEAD_TIME_NS * 1e-9f / CFOC_TS)
 
 /* ── Calibration ─────────────────────────────────────────────────────────── */
 #define CFOC_CALIB_SAMPLES      64U      /* ADC samples for bootstrap offset */
@@ -91,11 +93,20 @@ typedef enum {
 #define CFOC_XF_DWELL_MS          200U      /* BEMF must exceed threshold for this long */
 #define CFOC_XF_DURATION_MS       500U      /* Crossfade blend duration [ms] (slow for safety) */
 
-/* EKF speed filter — smooth noisy speed before angle integration.
- * τ = 20 ms filters the electrical-frequency oscillation (~53 Hz at 1600 RPM,
- * period 18.8 ms) by ~85%. Tracks speed changes on ~100 ms timescale.
- * α = Ts / (τ + Ts) = 40µs / 20.04ms ≈ 0.002 */
-#define CFOC_EKF_SPEED_LPF_ALPHA  0.002f    /* τ ≈ 20 ms */
+/* EKF speed filter — two independent LPFs from the same raw EKF speed:
+ *
+ * 1. ANGLE LPF (τ=20ms): drives commutation angle integration.
+ *    Filters 53 Hz electrical noise by ~85%. Fast enough to track
+ *    real speed ramps without lag. Proven stable — do not change.
+ *    α = Ts / (τ + Ts) = 40µs / 20.04ms ≈ 0.002
+ *
+ * 2. PI LPF (τ=100ms): feeds the speed PI controller only.
+ *    Filters 53 Hz noise by ~97%, leaving <50 RPM noise on PI input.
+ *    Slower than angle LPF — the PI loop bandwidth (~3 Hz) is fine
+ *    for RC car control; commands slew at 0.05 u/tick at 20 Hz.
+ *    α = Ts / (τ + Ts) = 40µs / 100.04ms ≈ 0.0004 */
+#define CFOC_EKF_SPEED_LPF_ALPHA    0.002f   /* τ ≈  20 ms — angle integration */
+#define CFOC_EKF_SPD_PI_LPF_ALPHA   0.0004f  /* τ ≈ 100 ms — speed PI feedback */
 
 /* EKF tuning — process/measurement noise.
  * EKF now runs at 25 kHz (was 1 kHz). Process noise scales with Ts
