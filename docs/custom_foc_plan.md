@@ -442,14 +442,66 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 
 **Goal:** Production-ready firmware.
 
-- [ ] Validate Vbus ADC reading on 3S LiPo (expect 9.0-12.6V)
-- [ ] CORDIC hardware sin/cos (replace `sincosf()` software call, saves ~20 cycles)
-- [ ] Overmodulation (OVM) for higher speed range
-- [ ] ADC sampling window optimization (sector-dependent, prevents distortion at high duty)
+- [x] Validate Vbus ADC reading on 3S LiPo — confirmed 12.4–12.9 V across ground tests (2026-04-07)
+- [x] CORDIC hardware sin/cos — Session 1 (2026-04-06), fixed FUNCTION_COSINE bug in commit 12d1ac6
+- [x] Overmodulation (OVM) — Session 2 (2026-04-07): PI Vmax raised to Vbus×2/π, float-level OVM clamp
+- [x] ADC sampling window optimization — Session 2 (2026-04-07): CC4 = CCR_max + (ARR−CCR_max)/2 per tick
 - [ ] Test on HOSIM car (different motor parameters)
-- [ ] Reduce OBS_MINIMUM_SPEED_RPM: 1200 → 800 → 600 → 400
+- [ ] Reduce OBS_MINIMUM_SPEED_RPM: 1600 → 1200 → 800
 - [ ] Odometry from wheel speed + IMU
 - [ ] ROS2 nav stack integration
+
+---
+
+### Step 6 Session Log
+
+#### Session 1 — 2026-04-06 (bench-validated, ground-validated 2026-04-07)
+
+**Branch:** `custom_foc`  **Files:** `custom_foc.h`, `custom_foc.c`
+
+| Change | Detail |
+|---|---|
+| CORDIC sin/cos | Replaced `sincosf()` in 25 kHz HF ISR. Bug in first commit (FUNCTION_SINE→wrong read order); fixed in 12d1ac6 to FUNCTION_COSINE, precision 6 cycles, defensive CSR re-issue every tick |
+| Dual speed LPF | `ekf_omega_filt` τ=20 ms (angle + telemetry), `ekf_omega_pi` τ=100 ms (speed PI only). Goal: 97% attenuation of 53 Hz EKF noise vs 85% before |
+| Adaptive Vdt | `cfoc_vdt_rt = CFOC_GetVbusV() × CFOC_VDT_PER_VBUS` updated every 100 ms in MF task. Replaces hardcoded 12 V in EKF voltage model |
+
+**Bench bag** `rosbag2_2026_04_06-18_01_53`: 37.8 s, fwd+rev, 0 faults, ~2990 RPM at u=1.0.
+**Ground bag** `rosbag2_2026_04_07-10_48_43`: 115 s, fwd only, 0 faults, max 3147 RPM, Iq stdev 1.769 A at u>0.8.
+
+---
+
+#### Session 2 — 2026-04-07 (ground-validated fwd + rev)
+
+**Branch:** `custom_foc`  **Files:** `custom_foc.h`, `custom_foc.c`
+
+| Change | Detail |
+|---|---|
+| SVM runtime Vbus | Added `cfoc_vbus_rt` (was missing — SVM_Apply had hardcoded 12 V). Updated every 100 ms alongside `cfoc_vdt_rt`. Fixes ~6% voltage error at 12.8 V Vbus |
+| PI Vmax → OVM ceiling | `CFOC_PI_VMAX_PER_VBUS = 2/π ≈ 0.6366`. PI out_max updated at runtime: `cfoc_vbus_rt × 2/π`. Raises ceiling from 6.9 V (Vbus/√3) to 7.64 V (+15%). OVM clamp moved to float level (Va/Vb/Vc) before CCR conversion — symmetric six-step clipping |
+| ADC sampling window | CC4 updated every ISR tick inside SVM_Apply: `CC4 = CCR_max + (ARR−CCR_max)/2`. ADC fires in settled all-low-side window regardless of duty cycle. Init (calibration phase) stays at ARR−1 |
+
+**Ground bags (AMORIL #1):**
+
+| Bag | Dir | Duration | Max RPM | Iq stdev @ u>0.8 | Faults |
+|---|---|---|---|---|---|
+| `rosbag2_2026_04_07-11_33_20` | Fwd+Rev | 136 s | 3006 / −2647 RPM | 1.266 / 1.016 A | none |
+| `rosbag2_2026_04_07-11_41_33` | Fwd only | 124 s | 3091 RPM | **0.332 A** | none |
+
+**Iq chatter improvement vs Session 1 baseline (u>0.8, sustained full throttle):**
+- Pre-Session 2: 1.769 A stdev (rosbag 10:48)
+- Post-Session 2: 0.332 A stdev (rosbag 11:41) → **−81%**
+
+**Note:** Motor is Iq-limited (12 A clamp) at these speeds, not voltage-limited. OVM headroom not yet exercised. Will appear at higher `max_speed_rpm` or lower Iq limit.
+
+**ROS2 node change** (`esc_node_custom_foc.py` in `mrad_ws_2601_zulu`):
+- Replaced `Joy` subscriber with `cmd_vel_stamped` (`geometry_msgs/TwistStamped`)
+- `twist.linear.x` → u: proportional in CLOSED_LOOP, fixed `u_startup` during startup phases
+- New params: `max_linear_mps` (default 1.0 m/s), `cmd_vel_timeout` (default 0.5 s → neutral)
+- Deadband scaled to m/s: `|vx| < deadband × max_linear_mps`
+
+**IMU crash analysis** (`rosbag2_2026_04_07-11_41_33`):
+- t+1.98 s OL abort: wheel spin during startup (gyro built 0→0.78 rad/s), not a crash — user released stick
+- t+123.22 s: |a|=25.88 m/s² diagonal impact (ax=+16, ay=+20) — wall/corner hit in CLOSED_LOOP. Firmware held CLOSED_LOOP through impact, user stopped 1.4 s later. No fault triggered.
 
 ---
 

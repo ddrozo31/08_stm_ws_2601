@@ -121,13 +121,21 @@ typedef enum {
  * Current PI bandwidth ωc ≈ 2π×1000 rad/s (1 kHz crossover):
  *   Kp = Ls × ωc = 10µH × 6283 = 0.063
  *   Ki = Rs × ωc = 0.1  × 6283 = 628.3  → discrete: Ki×Ts = 628.3/25000 = 0.025
- * Vmax ≈ Vbus/√3 ≈ 12V/1.732 ≈ 6.9V (for 3S LiPo ~12V nominal)
+ *
+ * Vmax ceiling:
+ *   Linear SVPWM limit:  Vbus / √3  ≈ 12 / 1.732 = 6.93 V
+ *   Six-step (OVM) ceil: Vbus × 2/π ≈ 12 × 0.6366 = 7.64 V  (+15 %)
+ *
+ * The PI out_max is updated at runtime in CFOC_MediumFrequencyTask to
+ * cfoc_vbus_rt × CFOC_PI_VMAX_PER_VBUS so it tracks battery discharge.
+ * CFOC_PI_VMAX is the compile-time initialiser (12 V nominal).
  */
 #define CFOC_PI_IQ_KP           0.063f
 #define CFOC_PI_IQ_KI           0.025f    /* Already discretized (Ki × Ts) */
 #define CFOC_PI_ID_KP           0.063f
 #define CFOC_PI_ID_KI           0.025f
-#define CFOC_PI_VMAX            6.9f      /* Max voltage magnitude [V] */
+#define CFOC_PI_VMAX_PER_VBUS   (2.0f / 3.14159265359f)  /* six-step ceil: 2/π ≈ 0.6366 */
+#define CFOC_PI_VMAX            (12.0f * CFOC_PI_VMAX_PER_VBUS)  /* nominal init ≈ 7.64 V */
 
 /* ── Speed PI controller parameters (Step 4) ────────────────────────────── */
 /*

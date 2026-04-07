@@ -125,9 +125,12 @@ static volatile float   cfoc_torque_iq   = 0.0f;
 /* ── Runtime Iq limit (overrides CFOC_PI_SPD_IQ_MAX if set) ──────────── */
 static volatile float cfoc_iq_limit = CFOC_PI_SPD_IQ_MAX;
 
-/* ── Runtime dead-time voltage (updated from measured Vbus every 100ms) ── */
-/* Vdt = Vbus × CFOC_VDT_PER_VBUS; initialised to 12V nominal. */
-static volatile float cfoc_vdt_rt = 12.0f * CFOC_VDT_PER_VBUS;
+/* ── Runtime Vbus + dead-time voltage (updated from measured Vbus every 100ms) ── */
+/* cfoc_vbus_rt: measured DC bus voltage [V] — used for SVM normalization and OVM ceiling.
+ * cfoc_vdt_rt:  Vbus × CFOC_VDT_PER_VBUS — dead-time drop fed to EKF voltage model.
+ * Both initialised to 12V nominal. */
+static volatile float cfoc_vbus_rt = 12.0f;
+static volatile float cfoc_vdt_rt  = 12.0f * CFOC_VDT_PER_VBUS;
 
 /* ── Runtime startup parameters (overridable via ESC 0xCC config) ────── */
 static volatile float  cfg_ol_iq_target = CFOC_OL_IQ_TARGET;
@@ -170,26 +173,30 @@ static inline void PI_Reset(CFOC_PI_t *pi)
 }
 
 /**
- * Space Vector Modulation — standard 7-segment center-aligned.
+ * Space Vector Modulation — center-aligned with overmodulation (OVM) support.
  * Input:  Valpha, Vbeta in volts.
- * Output: writes TIM1 CCR1/2/3 directly.
+ * Output: writes TIM1 CCR1/2/3 and CC4 (ADC trigger) directly.
  *
- * Normalization: duty = 0.5 + V / Vbus  (Vbus read from ADC or assumed)
- * For now, assume Vbus ≈ 12V (3S LiPo nominal).
+ * Normalization uses cfoc_vbus_rt (measured, updated every 100 ms).
+ *
+ * Overmodulation: requesting |V_αβ| > Vbus/√3 is valid — min-max injection
+ * already maximises the linear SVPWM region. When the request exceeds it,
+ * Va/Vb/Vc go outside [-0.5, 0.5]; clamping them at the float level before
+ * CCR conversion implements OVM mode 2 (six-step clipping), giving up to
+ * 15 % more fundamental voltage vs linear SVPWM.
+ *
+ * ADC sampling window: CC4 is set to the midpoint between CCR_max and ARR so
+ * the injected conversion always fires when all three phases are settled in
+ * their high-impedance (all-low-side) state, regardless of duty cycle.
+ * Formula: CC4 = CCR_max + (ARR − CCR_max) / 2
  */
 static void SVM_Apply(float Valpha, float Vbeta)
 {
-  /* TODO: read actual Vbus from ADC regular channel.
-   * For Step 2, use nominal 12V. */
-  const float Vbus = 12.0f;
-  const float inv_Vbus = 1.0f / Vbus;
-  const float half_period = (float)CFOC_PWM_HALF_PERIOD;
+  const float Vbus      = cfoc_vbus_rt;           /* measured Vbus [V] */
+  const float inv_Vbus  = 1.0f / Vbus;
+  const float half_per  = (float)CFOC_PWM_HALF_PERIOD;  /* ARR = 3400 */
 
-  /* Inverse Clarke to get phase voltages (balanced 3-phase):
-   *   Va = Valpha
-   *   Vb = -0.5·Valpha + (√3/2)·Vbeta
-   *   Vc = -0.5·Valpha - (√3/2)·Vbeta
-   */
+  /* Inverse Clarke → balanced 3-phase voltages */
   float Va = Valpha;
   float Vb = -0.5f * Valpha + (SQRT3 * 0.5f) * Vbeta;
   float Vc = -0.5f * Valpha - (SQRT3 * 0.5f) * Vbeta;
@@ -199,32 +206,31 @@ static void SVM_Apply(float Valpha, float Vbeta)
   Vb *= inv_Vbus;
   Vc *= inv_Vbus;
 
-  /* Min-max injection (SVPWM equivalent — centers the waveform) */
-  float vmin = Va;
-  if (Vb < vmin) vmin = Vb;
-  if (Vc < vmin) vmin = Vc;
-  float vmax = Va;
-  if (Vb > vmax) vmax = Vb;
-  if (Vc > vmax) vmax = Vc;
+  /* Min-max injection (SVPWM — centres the waveform, maximises linear range) */
+  float vmin = Va; if (Vb < vmin) vmin = Vb; if (Vc < vmin) vmin = Vc;
+  float vmax = Va; if (Vb > vmax) vmax = Vb; if (Vc > vmax) vmax = Vc;
   float voffset = -(vmax + vmin) * 0.5f;
-
   Va += voffset;
   Vb += voffset;
   Vc += voffset;
 
-  /* Convert to timer compare values: CCRx = (0.5 + Vx) × ARR
-   * Clamp to [1, ARR-1] to keep dead-time valid */
-  int32_t ccr_a = (int32_t)((0.5f + Va) * half_period);
-  int32_t ccr_b = (int32_t)((0.5f + Vb) * half_period);
-  int32_t ccr_c = (int32_t)((0.5f + Vc) * half_period);
+  /* OVM clamp at float level (six-step ceiling).
+   * In linear SVPWM, max(|Va|,|Vb|,|Vc|) = 0.5 exactly.
+   * Above that the waveform clips to square-wave, giving up to ~15 % more
+   * fundamental. Clamping here (not at CCR) preserves waveform symmetry. */
+  if (Va >  0.5f) Va =  0.5f; else if (Va < -0.5f) Va = -0.5f;
+  if (Vb >  0.5f) Vb =  0.5f; else if (Vb < -0.5f) Vb = -0.5f;
+  if (Vc >  0.5f) Vc =  0.5f; else if (Vc < -0.5f) Vc = -0.5f;
 
-  /* Clamp */
-  if (ccr_a < 1) ccr_a = 1;
-  if (ccr_a > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_a = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
-  if (ccr_b < 1) ccr_b = 1;
-  if (ccr_b > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_b = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
-  if (ccr_c < 1) ccr_c = 1;
-  if (ccr_c > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_c = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
+  /* Convert to CCR: CCRx = (0.5 + Vx) × ARR, guard dead-time margins */
+  int32_t ccr_a = (int32_t)((0.5f + Va) * half_per);
+  int32_t ccr_b = (int32_t)((0.5f + Vb) * half_per);
+  int32_t ccr_c = (int32_t)((0.5f + Vc) * half_per);
+
+  /* Dead-time guard: keep 1 count away from 0 and ARR */
+  if (ccr_a < 1) ccr_a = 1; else if (ccr_a > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_a = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
+  if (ccr_b < 1) ccr_b = 1; else if (ccr_b > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_b = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
+  if (ccr_c < 1) ccr_c = 1; else if (ccr_c > (int32_t)CFOC_PWM_HALF_PERIOD - 1) ccr_c = (int32_t)CFOC_PWM_HALF_PERIOD - 1;
 
   dbg_ccr1 = (uint32_t)ccr_a;
   dbg_ccr2 = (uint32_t)ccr_b;
@@ -233,6 +239,16 @@ static void SVM_Apply(float Valpha, float Vbeta)
   LL_TIM_OC_SetCompareCH1(TIM1, (uint32_t)ccr_a);
   LL_TIM_OC_SetCompareCH2(TIM1, (uint32_t)ccr_b);
   LL_TIM_OC_SetCompareCH3(TIM1, (uint32_t)ccr_c);
+
+  /* ADC sampling window: trigger when all phases are settled (all-low region).
+   * CCR_max marks the last switch transition on the way to the peak.
+   * Sample midway between CCR_max and ARR: all phases stable, zero current error.
+   * CC4 = CCR_max + (ARR − CCR_max) / 2 */
+  int32_t ccr_max = ccr_a;
+  if (ccr_b > ccr_max) ccr_max = ccr_b;
+  if (ccr_c > ccr_max) ccr_max = ccr_c;
+  int32_t cc4 = ccr_max + ((int32_t)CFOC_PWM_HALF_PERIOD - ccr_max) / 2;
+  LL_TIM_OC_SetCompareCH4(TIM1, (uint32_t)cc4);
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -286,18 +302,11 @@ void CFOC_Init(void)
   LL_TIM_OC_SetCompareCH2(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
   LL_TIM_OC_SetCompareCH3(TIM1, CFOC_PWM_HALF_PERIOD / 2U);
 
-  /* CC4 triggers ADC via TRGO=OC4REF.
-   * CH4 is PWM2 mode: OC4REF=1 when counter >= CC4.
-   * In center-aligned mode, counter counts 0→ARR→0.
-   * We want to sample at the CENTER of the low-side ON-time,
-   * which is when the counter is near ARR (top of triangle).
-   * Set CC4 to (ARR - 1) so OC4REF rising edge triggers ADC
-   * at the top, where at least 2 of 3 low-side FETs are ON
-   * and shunt current is measurable.
-   *
-   * NOTE: With extreme duty cycles (CCR near 0 or near ARR),
-   * one phase may not have a measurable window — that's a
-   * Step 6 optimization (sector-dependent sampling). */
+  /* CC4 triggers ADC via TRGO=OC4REF (PWM2 mode: OC4REF=1 when counter >= CC4).
+   * Init to (ARR - 1): during calibration all phases are at 50% duty, so
+   * sampling at the peak is correct. Once the motor starts, SVM_Apply()
+   * updates CC4 every ISR tick to: CCR_max + (ARR − CCR_max) / 2,
+   * keeping the trigger in the all-low-side settled window at any duty. */
   LL_TIM_OC_SetCompareCH4(TIM1, CFOC_PWM_HALF_PERIOD - 1U);
 
   /* Enable PWM channel outputs (high-side + low-side for 3 phases) */
@@ -564,7 +573,16 @@ void CFOC_MediumFrequencyTask(void)
   {
     vbus_update_ctr = 0U;
     float v = CFOC_GetVbusV();
-    if (v > 0.0f)  cfoc_vdt_rt = v * CFOC_VDT_PER_VBUS;
+    if (v > 0.0f) {
+      cfoc_vbus_rt = v;
+      cfoc_vdt_rt  = v * CFOC_VDT_PER_VBUS;
+      /* Update current PI voltage ceiling to six-step limit for measured Vbus.
+       * This allows overmodulation up to the square-wave ceiling (Vbus × 2/π),
+       * while correctly tracking battery discharge. */
+      float vmax_rt = v * CFOC_PI_VMAX_PER_VBUS;
+      pi_iq.out_min = -vmax_rt;  pi_iq.out_max = vmax_rt;
+      pi_id.out_min = -vmax_rt;  pi_id.out_max = vmax_rt;
+    }
   }
 
   /* ── ALIGNMENT phase: wait for rotor to lock, then transition ──────── */
