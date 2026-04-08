@@ -73,19 +73,14 @@ typedef enum {
 /* ── Open-loop startup parameters ────────────────────────────────────────── */
 #define CFOC_OL_RAMP_MS         3000U     /* Speed ramp duration [ms] */
 #define CFOC_OL_TARGET_RPM      1400.0f   /* Open-loop target / EKF handoff speed [RPM].
-                                           * Session 5 v3 (2026-04-07): reverted 1200 → 1400 RPM.
-                                           * Reason: at 1200 RPM Vdt/BEMF=98% is the physics floor
-                                           * and the EKF speed estimate is too noisy for reliable
-                                           * CL transition — reverse direction consistently lurches
-                                           * because ekf_omega_filt collapses at the crossfade tail
-                                           * (3-4/6 rough transitions in bag 19_25_25 after v2 fixes).
-                                           * Even with EKF convergence gate + correct PI seed, the
-                                           * LPF drops 1400→460 RPM in the first 100ms of CL.
-                                           * At 1400 RPM: Vdt/BEMF ≈ 84% (16% margin), Session 3
-                                           * validated with 0 faults. Accept the slightly higher
-                                           * handoff speed for reliable transition.
-                                           * History: 1600 (S1, proven) → 1400 (S3, solid) →
-                                           *          1200 (S4, unreliable) → 1400 (S5 v3). */
+                                           * At 1400 RPM: BEMF = 0.286 V, Vdt ≈ 0.24 V →
+                                           * Vdt/BEMF ≈ 84% (16% margin). Session 3 baseline.
+                                           * 1200 RPM (Session 4) was the physics floor and was
+                                           * abandoned — Vdt/BEMF=98% left no margin. 1600 RPM
+                                           * (Sessions 1–2) also worked but startup was 0.4s slower.
+                                           * Known issue: ~5% rough CL transitions on ground under
+                                           * load — observer-side limitation, deferred to Step 8
+                                           * (adaptive-R EKF rebuild). */
 #define CFOC_OL_IQ_RAMP_MS      500U      /* Current ramp duration [ms] */
 #define CFOC_OL_IQ_TARGET       5.0f      /* Open-loop Iq target [A] */
 #define CFOC_OL_ID_REF          0.0f      /* d-axis current reference (SPMSM → 0) */
@@ -98,11 +93,9 @@ typedef enum {
  * reliable angle estimate).
  *
  * BEMF² threshold: eα²+eβ² > CFOC_XF_BEMF_SQ_THRESH
- *   At 1200 RPM (Session 4 target): ω_e = 1200×2π/60×2 = 251 rad/s
- *   BEMF = Ψf × ω_e = 9.75e-4 × 251 = 0.245 V
- *   BEMF² = 0.060. Threshold at 0.05 ≈ 1100 RPM equivalent — just below the target.
- *   At this margin, the BEMF guard may trigger only slightly before ramp completion.
- *   (History: 1600 RPM → BEMF²=0.107; 1400 RPM → 0.082; 1200 RPM → 0.060)
+ *   At 1400 RPM: ω_e = 1400×2π/60×2 = 293 rad/s
+ *   BEMF = Ψf × ω_e = 9.75e-4 × 293 = 0.286 V
+ *   BEMF² = 0.082. Threshold at 0.05 ≈ 1100 RPM equivalent — comfortably below target.
  * Note: crossfade is time-triggered (ramp_ms completion + dwell), not BEMF-only.
  * The BEMF threshold is an additional guard — ramp completion is the primary trigger.
  */

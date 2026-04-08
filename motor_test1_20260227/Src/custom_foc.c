@@ -649,14 +649,10 @@ void CFOC_MediumFrequencyTask(void)
       xf_dwell_ms++;
       if (xf_dwell_ms >= CFOC_XF_DWELL_MS)
       {
-        /* Begin speed crossfade. Seed both LPFs with OL speed for smooth start.
-         * ekf_omega_filt drives angle integration (τ=20ms).
-         * ekf_omega_pi  drives speed PI feedback (τ=100ms) — must also be seeded
-         * so the PI sees the correct speed at CL entry, not a lagged estimate. */
-        xf_blend_ms    = 0U;
+        /* Begin speed crossfade. Seed the LPF with OL speed for smooth start. */
+        xf_blend_ms = 0U;
         ekf_omega_filt = ol_omega_e;
-        ekf_omega_pi   = ol_omega_e;
-        cfoc_state     = CFOC_CROSSFADE;
+        cfoc_state  = CFOC_CROSSFADE;
       }
     }
     else
@@ -686,35 +682,6 @@ void CFOC_MediumFrequencyTask(void)
 
     if (xf_blend_ms >= CFOC_XF_DURATION_MS)
     {
-      /* ── Session 5 (v2): EKF convergence gate ─────────────────────────
-       * At 1200 RPM the EKF BEMF SNR ≈ 1.0 (Vdt/BEMF ≈ 98%). If ekf_omega_filt
-       * has not converged close to ol_omega_e by end of crossfade, the motor
-       * is running on a bad speed estimate. Committing to CL at that moment
-       * collapses the angle integration speed (HF task uses pure ekf_omega_filt
-       * in CL, without the ol_omega_e anchor) → commutation angle lags → torque
-       * drops → physical deceleration → lurch.
-       *
-       * Gate: require |ekf_omega_filt - ol_omega_e| < 20% of |ol_omega_e|.
-       * If not met, hold xf_blend_ms one tick below the threshold and wait.
-       * This keeps α ≈ 1.0 (pure EKF driving angle) without committing to CL,
-       * giving the EKF LPF more time to converge under real electrical load.
-       *
-       * Hard cap: CFOC_XF_DURATION_MS + 500ms max extension. After that,
-       * commit anyway to avoid stalling forever (better to lurch than hang). */
-      float ol_rpm_abs  = fabsf(ol_omega_e) / RPM_TO_ERAD_S;
-      float ekf_rpm_f   = ekf_omega_filt / RPM_TO_ERAD_S;
-      float rpm_err_abs = fabsf(ekf_rpm_f - ol_omega_e / RPM_TO_ERAD_S);
-      uint8_t ekf_ok    = (ol_rpm_abs > 1.0f) &&
-                          (rpm_err_abs < 0.20f * ol_rpm_abs);
-      uint8_t xf_cap    = (xf_blend_ms >= (CFOC_XF_DURATION_MS + 500U));
-
-      if (!ekf_ok && !xf_cap)
-      {
-        /* Hold at end of crossfade (α = 1.0) and wait for EKF to converge. */
-        xf_blend_ms = CFOC_XF_DURATION_MS;
-        goto log_sample;
-      }
-
       /* Crossfade complete — fully EKF-driven.
        * Clamp speed PI to motoring torque only (no regen braking).
        * Braking at high speed with imperfect angle causes instability.
@@ -726,22 +693,8 @@ void CFOC_MediumFrequencyTask(void)
         pi_spd.out_min = -cfoc_iq_limit;
         pi_spd.out_max = 0.0f;
       }
-      /* Bumpless PI transfer — two parts must match:
-       *
-       * 1. Seed integrator to ol_Iq_ref so PI output starts at the current
-       *    already being driven (not zero).
-       *
-       * 2. Seed spd_cmd_rpm to ekf_omega_pi / RPM_TO_ERAD_S — the SAME
-       *    filtered signal the PI uses as feedback ([custom_foc.c:734]).
-       *    This guarantees speed_err = 0 on the first CL tick regardless of
-       *    raw EKF noise. Previously we used ekf_rpm (raw, unfiltered) which
-       *    at 1200 RPM with Vdt/BEMF≈98% could be wildly different from the
-       *    PI's filtered feedback, creating a large one-tick speed error that
-       *    corrupted the integral and crashed Iq → lurch.
-       *    The ESC slew limiter overrides this 1ms later and ramps toward
-       *    the user target. */
-      pi_spd.integral = ol_Iq_ref;
-      spd_cmd_rpm     = ekf_omega_pi / RPM_TO_ERAD_S;  /* PI's own feedback → err=0 */
+      pi_spd.integral = 0.0f;
+      spd_cmd_rpm = CFOC_OL_TARGET_RPM * (float)ol_direction;
       cfoc_state = CFOC_CLOSED_LOOP;
     }
 

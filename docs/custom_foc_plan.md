@@ -438,9 +438,11 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 
 ---
 
-### Step 6: Hardening & Optimization
+### Step 6: Hardening & Optimization — **CLOSED 2026-04-08**
 
 **Goal:** Production-ready firmware.
+
+**Closure note:** Step 6 closed at the Session 3 baseline (1400 RPM crossfade, circle limiter fix, OVM, CORDIC, dual LPF, runtime Vbus). Session 4 (1200 RPM) and Session 5 (OL→CL controller patches) reverted. Residual ~5% rough CL transition rate under load is observer-side and parked as Step 8 (adaptive-R EKF) — to be addressed after Step 7 (ROS2 nav stack).
 
 - [x] Validate Vbus ADC reading on 3S LiPo — confirmed 12.4–12.9 V across ground tests (2026-04-07)
 - [x] CORDIC hardware sin/cos — Session 1 (2026-04-06), fixed FUNCTION_COSINE bug in commit 12d1ac6
@@ -448,8 +450,8 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 - [x] ADC sampling window optimization — Session 2 (2026-04-07): CC4 = CCR_max + (ARR−CCR_max)/2 per tick
 - [x] Fix circle limiter: use runtime Vbus instead of compile-time CFOC_PI_VMAX — Session 3 (2026-04-07)
 - [x] Lower crossfade speed: 1600 → 1400 RPM bench + ground validated — Session 3 (2026-04-07)
-- [x] Lower crossfade speed: 1400 → 1200 RPM bench + ground validated — Session 4 (2026-04-07)
-- [ ] Smooth OL→CL transition (grinding + lurch at EKF lock) — Session 5 **UNRESOLVED, pick up next session** (see Session 5 notes below)
+- [x] ~~Lower crossfade speed: 1400 → 1200 RPM bench + ground validated — Session 4 (2026-04-07)~~ **REVERTED 2026-04-08** — 1200 RPM is the physics floor (Vdt/BEMF=98%) and exposed an EKF speed-collapse failure mode under load. Reverted to 1400 RPM (Session 3 baseline).
+- [x] ~~Smooth OL→CL transition (grinding + lurch at EKF lock)~~ **DEFERRED to Step 8 (2026-04-08)** — Session 5 attempted five controller-side patches (bumpless PI seed, ekf_omega_pi seed, ESC speed slew, EKF convergence gate, filtered spd_cmd seed) across three iterations. None worked. Today's Step 1 experiment (gate disabled) confirmed the failure is observer-side, not controller-side: even when bumpless seed lands at full torque (CL #4 in bag 10_23_17 starts at Iq=−9.02 A), the EKF speed estimate collapses under load within 100 ms → angle integration slows → commutation lost → torque dies. Fix requires observer rewrite, not patches. See Step 8.
 - [ ] Odometry from wheel speed + IMU — Session 6 (ROS2, no firmware dependency)
 - [x] ~~Test on HOSIM car~~ — **OUT OF SCOPE**: HOSIM is a separate vehicle with different drivetrain
   characteristics and hardware availability. Firmware is AMORIL-validated; HOSIM port is its own
@@ -471,6 +473,59 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 > **On odometry:** Pure ROS2 software, no firmware dependency. Requires knowing AMORIL #1 gear
 > ratio and wheel circumference to convert `/esc/speed_rpm` → m/s. IMU fusion adds heading.
 > Target: `nav_msgs/Odometry` on `/odom` at 10 Hz, rosbag-verified.
+
+---
+
+### Step 8: Observer modernization — adaptive-R EKF (DEFERRED, post-ROS2)
+
+**Status:** Parked 2026-04-08 after Session 5 closure. Do **not** start until ROS2 nav stack
+(Step 7) is integrated and the car is driving autonomously. This is architectural work, not a
+patch — it deserves dedicated focus.
+
+**Problem statement:** The current discrete crossfade (OL angle → blended → pure EKF angle, 500 ms
+α-blend) has a failure mode under load: when CL is entered, `ekf_omega_filt` becomes the sole
+driver of angle integration, and at marginal BEMF SNR (Vdt/BEMF ≥ ~80%) the EKF speed estimate can
+collapse within 100 ms — angle integration slows → commutation lost → torque dies → rotor
+decelerates → EKF estimate gets worse → death spiral. Manifests as ~5% rough CL transitions on
+ground (Session 3 baseline) and is not fixable from the controller side. See Session 5 for the
+five failed patch attempts and bag `rosbag2_2026_04_08-10_23_17` CL #4 for the diagnostic.
+
+**Architectural fix:** Replace the discrete crossfade with **adaptive measurement noise R(t) in
+the EKF**. Instead of α-blending two angle sources, run the EKF continuously from t=0 with R that
+smoothly de-emphasizes its own measurements when BEMF SNR is poor:
+
+```
+R(t) = R₀ × max(1, (BEMF_threshold² / BEMF_estimate²))
+```
+
+When BEMF is small (low speed, startup), R is huge → Kalman gain ≈ 0 → measurement update has no
+effect → EKF behaves like pure prediction → angle is determined by the imposed V-f prior. When
+BEMF grows, R shrinks → measurement update gradually takes over → angle is corrected against BEMF
+data. **No discrete CROSSFADE state. No CL entry. No bumpless transfer needed.** The Kalman gain
+itself is the bumpless mechanism.
+
+**Conceptual analogue:** This is what TI's InstaSPIN-FOC and other production sensorless drives
+do — flux observer with adaptive gain instead of procedural α-blend. The discrete crossfade was
+an MVP shortcut.
+
+**Scope and effort estimate:**
+1. Re-derive R as a function of BEMF magnitude estimate (from EKF state).
+2. Add ω as a state variable with high process noise Q during startup, decaying as confidence builds.
+3. Eliminate the discrete CROSSFADE state from the state machine — collapse to ALIGNMENT → SPINNING.
+4. Retune Q/R across the speed range; bench-validate startup; ground-validate under load.
+5. Re-do all Session 3–5 bag analysis on the rebuilt observer.
+
+Estimated 1–2 weeks of focused work. **Not blocking** for the project goal (ROS2 nav stack on a
+working car); the 5% rough rate of the Session 3 baseline is tolerated by the upper control loop.
+
+**Concrete validation target:** Reproduce CL #4 conditions from bag `rosbag2_2026_04_08-10_23_17`
+(reverse direction, low cmd, full load) and confirm the death spiral does not occur.
+
+**Why also not LQR:** LQR (or LQG) does not address this bug. The failure is in the state
+estimator, not the regulator. Replacing cascaded PI with LQR would not change the death-spiral
+pattern. LQR is a separate possible refinement for the high-speed regime; it's orthogonal to the
+startup/transition problem and lower-priority for an RC vehicle (3 Hz speed loop bandwidth is
+sufficient). Do not bundle the two.
 
 ---
 
@@ -782,8 +837,55 @@ move to hypothesis 3 (align CFOC/ESC on the same LPF).
 | `rosbag2_2026_04_07-19_25_25` | Session 5 v2 ground (1200 RPM + gate + Fix F) | 4/6 reverse rough |
 | `rosbag2_2026_04_07-19_38_44` | Session 5 v3 ground (1400 RPM + gate + Fix F) | 4/6 rough; user says worse feel |
 | `rosbag2_2026_04_07-19_41_21` | Session 5 v3 ground | 2/2 rough; Iq sign anomaly #1 |
+| `rosbag2_2026_04_08-09_24_08` | Session 5 follow-up bench (gate disabled) | 3/3 CL, 0 faults — bench can't reproduce load-induced grind |
+| `rosbag2_2026_04_08-10_23_17` | Session 5 follow-up ground (gate disabled) | 1 clean / 1 partial / 2 dips / 1 sustained collapse — only marginal improvement vs v3 |
+| `rosbag2_2026_04_08-11_02_43` | **Post-revert ground validation** (Session 3 baseline restored) | **10/10 CL, 0 faults; reverse CL #4/#5 hold steady at full torque (no death spiral); parity with Session 3 confirmed** |
 
 Analysis tool: `tests/analyze_cl_transition.py <bag_dir>`
+
+##### Session 5 closure — 2026-04-08
+
+**Decision:** Reverted all five Session 5 fixes (A/B/D/E/F) and Session 4's 1200 RPM target back
+to Session 3 baseline (1400 RPM, no patches). Step 6 closed with a known ~5% rough rate as the
+documented residual. Observer rebuild deferred to Step 8.
+
+**Why:** Step 1 follow-up experiment (Fix E disabled, Fix A/B/D/F kept) ground-tested in bag
+`rosbag2_2026_04_08-10_23_17` showed only marginal improvement vs v3 (3/5 rough vs 4/6 rough),
+still well short of Session 3's ~5% baseline. The decisive evidence was CL #4 in that bag: bumpless
+seed landed at full torque (Iq=−9.02 A at CL entry — exactly as Fix A intended) and the system
+collapsed anyway over the next 100 ms. When the controller-side fix lands perfectly and the system
+still fails, the bug is not in the controller. It's in the observer. The five patches were
+attacking the wrong layer.
+
+**Files reverted (this conversation):**
+- `motor_test1_20260227/Inc/custom_foc.h` — removed `CFOC_XF_USE_EKF_GATE` define, restored
+  `CFOC_OL_TARGET_RPM` comment, refreshed BEMF threshold doc to reference 1400 RPM.
+- `motor_test1_20260227/Src/custom_foc.c` — removed `ekf_omega_pi = ol_omega_e` seed at crossfade
+  entry, removed entire EKF gate block (incl. `#if`/`#endif`), restored
+  `pi_spd.integral = 0.0f` and `spd_cmd_rpm = CFOC_OL_TARGET_RPM × ol_direction` at CL entry.
+- `motor_test1_20260227/Src/esc_app.c` — removed `ESC_SPD_SLEW_RPM_PER_TICK`, removed
+  `esc_speed_cmd` state var, restored `CFOC_SetSpeed(u * esc_max_spd_rpm)` direct path in both
+  FORWARD and REVERSE CL blocks.
+
+**Kept from Session 3 (still good):**
+- Circle limiter using runtime `vmax_rt = cfoc_vbus_rt × 2/π` in `CFOC_HighFrequencyTask`.
+- `CFOC_OL_TARGET_RPM = 1400.0f`.
+
+**Validation plan after revert:** flash, ground test, confirm parity with Session 3 bag
+`rosbag2_2026_04_07-18_04_22`. Then commit and move to Step 7 (ROS2 nav stack).
+
+**Validation result — DONE 2026-04-08:** Bag `rosbag2_2026_04_08-11_02_43` (post-revert ground
+test) shows 10/10 CL entries, 0 faults. The decisive comparison is the reverse-low-cmd cases that
+were the v3 failure mode:
+
+| Bag | Reverse CL transitions |
+|---|---|
+| `10_23_17` (Step 1, gate disabled, all v3 fixes still in place) | CL #4 (rev): −1580→−856 RPM, Iq collapsed −9.02→−0.65 A — **death spiral** |
+| `11_02_43` (post-revert, this session) | CL #4 (rev): −1539→−1537 RPM steady, Iq −12.02 A. CL #5 (rev): −1569→−1577 steady, Iq −12.07 A — **clean** |
+
+The exact failure mode that defeated all five Session 5 patches is gone after reverting them.
+This confirms two things: (a) the patches were not just neutral, they were actively making things
+worse; (b) Session 3 baseline reliability is recovered. **Step 6 closed.**
 
 ---
 

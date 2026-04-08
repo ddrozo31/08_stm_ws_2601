@@ -30,11 +30,6 @@
 #define ESC_RESTART_DELAY_MS    500U      /* Back-off between auto-restarts */
 #define ESC_TELEMETRY_EVERY     100U      /* Telemetry rate: 1000/100 = 10 Hz */
 #define ESC_WRONG_ANGLE_RPM     50.0f     /* Speed sign mismatch threshold */
-/* Speed command slew rate at CL entry: 10 RPM/tick at 1 kHz = 10000 RPM/s.
- * Limits the step from OL speed (1200 RPM) to user target (e.g. 2700 RPM) so
- * the PI error stays small and Iq rises smoothly instead of slamming to clamp.
- * 10 RPM/ms → 1200→2700 RPM transition takes ~150 ms (imperceptible to the user). */
-#define ESC_SPD_SLEW_RPM_PER_TICK  10.0f
 
 /* ── State ───────────────────────────────────────────────────────────────── */
 static ESC_State_t  esc_state       = ESC_BOOT;
@@ -45,7 +40,6 @@ static uint16_t     esc_tlm_ctr     = 0U;
 static uint16_t     esc_restart_dly = 0U;
 static int8_t       esc_direction   = 0;      /* +1 forward, -1 reverse */
 static uint8_t      esc_cl_entered  = 0U;     /* 1 once CFOC reaches CLOSED_LOOP */
-static float        esc_speed_cmd   = 0.0f;   /* Slewed speed command sent to CFOC [RPM] */
 
 /** Send one telemetry frame with current state. */
 static void esc_send_telemetry(float u)
@@ -133,7 +127,6 @@ void ESC_APP_Tick(void)
       {
         esc_direction  = 1;
         esc_cl_entered = 0U;
-        esc_speed_cmd  = 0.0f;
 
         CFOC_Start(1);
         esc_state = ESC_FORWARD;
@@ -142,7 +135,6 @@ void ESC_APP_Tick(void)
       {
         esc_direction  = -1;
         esc_cl_entered = 0U;
-        esc_speed_cmd  = 0.0f;
 
         CFOC_Start(-1);
         esc_state = ESC_REVERSE;
@@ -192,25 +184,9 @@ void ESC_APP_Tick(void)
     if (cfoc_st == CFOC_CLOSED_LOOP)
     {
       if (!esc_cl_entered)
-      {
-        /* First CL tick: seed slew tracker to the ACTUAL measured speed so
-         * the ramp starts from reality, not from CFOC_OL_TARGET_RPM.
-         * During crossfade the motor overshoots OL target (e.g. 1200→1840 RPM).
-         * Starting the slew from the actual speed keeps the PI error near zero
-         * on entry and prevents the Iq crash that causes the lurch + grinding. */
-        esc_speed_cmd  = CFOC_GetSpeedRPM();
         esc_cl_entered = 1U;
-      }
 
-      /* Slew speed command toward user target at bounded rate.
-       * Prevents large PI error step from slamming Iq to clamp. */
-      float spd_target = u * esc_max_spd_rpm;
-      float delta = spd_target - esc_speed_cmd;
-      if (delta >  ESC_SPD_SLEW_RPM_PER_TICK) delta =  ESC_SPD_SLEW_RPM_PER_TICK;
-      if (delta < -ESC_SPD_SLEW_RPM_PER_TICK) delta = -ESC_SPD_SLEW_RPM_PER_TICK;
-      esc_speed_cmd += delta;
-
-      CFOC_SetSpeed(esc_speed_cmd);
+      CFOC_SetSpeed(u * esc_max_spd_rpm);
     }
     break;
   }
@@ -257,19 +233,9 @@ void ESC_APP_Tick(void)
     if (cfoc_st == CFOC_CLOSED_LOOP)
     {
       if (!esc_cl_entered)
-      {
-        /* Same as FORWARD: seed to actual speed, not OL target. */
-        esc_speed_cmd  = CFOC_GetSpeedRPM();
         esc_cl_entered = 1U;
-      }
 
-      float spd_target = u * esc_max_spd_rpm;  /* u < 0 → negative speed */
-      float delta = spd_target - esc_speed_cmd;
-      if (delta >  ESC_SPD_SLEW_RPM_PER_TICK) delta =  ESC_SPD_SLEW_RPM_PER_TICK;
-      if (delta < -ESC_SPD_SLEW_RPM_PER_TICK) delta = -ESC_SPD_SLEW_RPM_PER_TICK;
-      esc_speed_cmd += delta;
-
-      CFOC_SetSpeed(esc_speed_cmd);
+      CFOC_SetSpeed(u * esc_max_spd_rpm);  /* u < 0 → negative speed */
     }
     break;
   }
