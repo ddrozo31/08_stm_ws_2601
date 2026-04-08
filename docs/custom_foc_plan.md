@@ -446,10 +446,31 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 - [x] CORDIC hardware sin/cos — Session 1 (2026-04-06), fixed FUNCTION_COSINE bug in commit 12d1ac6
 - [x] Overmodulation (OVM) — Session 2 (2026-04-07): PI Vmax raised to Vbus×2/π, float-level OVM clamp
 - [x] ADC sampling window optimization — Session 2 (2026-04-07): CC4 = CCR_max + (ARR−CCR_max)/2 per tick
-- [ ] Test on HOSIM car (different motor parameters)
-- [ ] Reduce OBS_MINIMUM_SPEED_RPM: 1600 → 1200 → 800
-- [ ] Odometry from wheel speed + IMU
-- [ ] ROS2 nav stack integration
+- [x] Fix circle limiter: use runtime Vbus instead of compile-time CFOC_PI_VMAX — Session 3 (2026-04-07)
+- [x] Lower crossfade speed: 1600 → 1400 RPM bench + ground validated — Session 3 (2026-04-07)
+- [x] Lower crossfade speed: 1400 → 1200 RPM bench + ground validated — Session 4 (2026-04-07)
+- [ ] Smooth OL→CL transition (grinding + lurch at EKF lock) — Session 5 **UNRESOLVED, pick up next session** (see Session 5 notes below)
+- [ ] Odometry from wheel speed + IMU — Session 6 (ROS2, no firmware dependency)
+- [x] ~~Test on HOSIM car~~ — **OUT OF SCOPE**: HOSIM is a separate vehicle with different drivetrain
+  characteristics and hardware availability. Firmware is AMORIL-validated; HOSIM port is its own
+  work thread and should not block Step 6 closure.
+- [x] ~~ROS2 nav stack integration~~ — **OUT OF SCOPE for Step 6**: Nav stack requires odometry,
+  costmap config, and a full nav2 bringup — a substantial independent work thread. `/cmd_vel_stamped`
+  interface is already nav2-compatible; the integration can proceed as Step 7 once odometry is ready.
+
+> **Scope decision (2026-04-07):** Step 6 is closed when the three remaining firmware/ROS2 items
+> are done: circle limiter fix, crossfade speed reduction, and wheel odometry. MultiCar (HOSIM)
+> and Nav Stack are explicitly deferred — they are orthogonal scopes that should not inflate Step 6.
+>
+> **On minimum crossfade speed:** The physics set a hard floor. At 1600 RPM, BEMF=0.327 V and
+> dead-time drop Vdt≈0.24 V (73% of BEMF). At 1200 RPM, Vdt ≈ 98% of BEMF — EKF voltage model
+> becomes unreliable. Target is 1400 RPM for Session 3 (conservative step), then evaluate 1200 RPM
+> in Session 4 if the crossfade is clean. 800 RPM is physically implausible with this motor at
+> 800 ns dead time — Vdt would exceed BEMF entirely.
+>
+> **On odometry:** Pure ROS2 software, no firmware dependency. Requires knowing AMORIL #1 gear
+> ratio and wheel circumference to convert `/esc/speed_rpm` → m/s. IMU fusion adds heading.
+> Target: `nav_msgs/Odometry` on `/odom` at 10 Hz, rosbag-verified.
 
 ---
 
@@ -502,6 +523,267 @@ with the existing PI controller (Step 4) naturally limits current to what's need
 **IMU crash analysis** (`rosbag2_2026_04_07-11_41_33`):
 - t+1.98 s OL abort: wheel spin during startup (gyro built 0→0.78 rad/s), not a crash — user released stick
 - t+123.22 s: |a|=25.88 m/s² diagonal impact (ax=+16, ay=+20) — wall/corner hit in CLOSED_LOOP. Firmware held CLOSED_LOOP through impact, user stopped 1.4 s later. No fault triggered.
+
+---
+
+#### Session 3 — 2026-04-07 (firmware fixes, bench validation pending)
+
+**Branch:** `custom_foc`  **Files:** `custom_foc.h`, `custom_foc.c`
+
+**Goal:** Close two open firmware items from the Step 6 checklist.
+
+| Change | Detail |
+|---|---|
+| Circle limiter bug fix | `CFOC_VMAX_RT` macro added to `custom_foc.h`. Circle limiter in `CFOC_HighFrequencyTask` now computes `vmax_rt = cfoc_vbus_rt × CFOC_PI_VMAX_PER_VBUS` per call and uses it for both the `Vmax_sq` threshold and the scale factor. Previously used the compile-time constant `CFOC_PI_VMAX` (12V nominal), which diverged from the runtime PI limits at any Vbus ≠ 12V. The mismatch was small (~0.08V at 12.8V) but created an inconsistency: PI outputs were clamped to the correct ceiling while the circle limiter used a stale one. |
+| Crossfade speed 1600 → 1400 RPM | `CFOC_OL_TARGET_RPM` lowered from 1600 to 1400. Startup time reduces by ~0.4 s (saves ~400ms of OL ramp at same ramp rate). Physics check: at 1400 RPM, BEMF = Ψf × ω_e = 9.75e-4 × 293 rad/s = 0.286 V; Vdt ≈ 0.24 V → Vdt/BEMF = 84% (acceptable, dead-time comp is active in EKF). At 1200 RPM, Vdt/BEMF ≈ 98% — marginal; defer to Session 4 after 1400 RPM is validated. |
+
+> **Why not 1200 RPM directly?** Conservative step-down avoids having to debug EKF divergence
+> and crossfade failure simultaneously. If 1400 RPM validates cleanly on bench, Session 4 can
+> drop to 1200 RPM with a single constant change.
+
+**Validation results — DONE (2026-04-07):**
+
+| Bag | Type | Duration | CL entries | Max RPM fwd | Max RPM rev | Faults |
+|---|---|---|---|---|---|---|
+| `rosbag2_2026_04_07-17_57_34` | Bench | 55.6s | 3 | +3169 | −3108 | none |
+| `rosbag2_2026_04_07-18_04_22` | Ground | 144.9s | 5 | +3096 | −3024 | none |
+
+- Crossfade at 1400 RPM fully stable — 8/8 CLOSED_LOOP entries across both bags, 0 faults.
+- Startup time unchanged at ~6.4s (time-triggered ramp; reducing `ol_ramp_ms` is a Session 4 option).
+- Major IMU impact during ground test (accel 13.6/18.1 m/s², ~2.2g diagonal at t=74.9s): CLOSED_LOOP held, no fault.
+- Longest sustained CL run: 51.4s at avg u=0.967 (segment 1, ground bag). No degradation over time.
+- **Next crossfade step (Session 4):** try 1200 RPM. Physics: Vdt/BEMF≈98% — marginal but compensation is active. One constant change (`CFOC_OL_TARGET_RPM 1200.0f`), bench validate first.
+
+---
+
+#### Session 4 — 2026-04-07 (bench + ground validation pending)
+
+**Branch:** `custom_foc`  **Files:** `custom_foc.h`
+
+**Goal:** Push crossfade handoff speed from 1400 → 1200 RPM. This is the physics floor — at 1200 RPM,
+Vdt/BEMF=98%, meaning dead-time compensation is carrying almost all the voltage model accuracy.
+Below 1200 RPM (e.g. 1000 RPM), Vdt > BEMF entirely and the EKF voltage model breaks down.
+
+| Change | Detail |
+|---|---|
+| Crossfade speed 1400 → 1200 RPM | `CFOC_OL_TARGET_RPM` set to `1200.0f`. At 1200 RPM: BEMF=0.245V, Vdt≈0.24V, Vdt/BEMF=98%. The BEMF² threshold (0.05) now corresponds to ~1100 RPM equivalent — the guard may engage slightly before ramp completion at this speed. |
+
+> **Physics floor note:** This is the last planned crossfade step. Going to 1000 RPM would require
+> Vdt < BEMF which cannot be achieved without reducing dead time in hardware (DTG register) or
+> accepting EKF divergence. 1200 RPM is the practical minimum for this motor+hardware combination.
+
+**Expected outcome:** Startup time reduces by ~0.5s (motor reaches 1200 RPM instead of 1400 RPM).
+Watch for: CROSSFADE failing to trigger (BEMF guard too tight), or EKF angle error causing
+overcurrent at CL entry. If either occurs, revert to 1400 RPM.
+
+**Validation results — DONE (2026-04-07):**
+
+| Bag | Type | Duration | CL entries | Max RPM fwd | Max RPM rev | Faults |
+|---|---|---|---|---|---|---|
+| `rosbag2_2026_04_07-18_17_57` | Bench | 38.4s | 2 | +3139 | −3387 | none |
+| `rosbag2_2026_04_07-18_19_36` | Ground | 259.2s | 9 | +3141 | −3072 | none |
+
+- 11/11 CLOSED_LOOP entries, 0 faults across both bags. EKF locks at 1200 RPM despite Vdt/BEMF=98%.
+- Major IMU impact (ground bag t=247.25s): gyro_z=4.88 rad/s (highest recorded), accel_y=19.60 m/s² (~2.0g). CLOSED_LOOP held, 0 faults.
+- Longest validation run to date: 259.2s ground bag, 9 CL entries, mixed fwd/rev.
+- Startup time unchanged at ~6.4s (time-triggered ramp; motor reaches 1200 RPM mid-ramp but waits for ol_ramp_ms).
+- **1200 RPM confirmed as practical minimum.** Do not attempt 1000 RPM — Vdt > BEMF, EKF voltage model breaks down.
+- **Crossfade speed reduction work COMPLETE.** Final: 1600→1400→1200 RPM over Sessions 3–4.
+- **Known issue:** At EKF lock (CROSSFADE→CLOSED_LOOP), grinding noise + brief slowdown + lurch reported on ground. Root cause diagnosed → fixed in Session 5.
+
+---
+
+#### Session 5 — 2026-04-07 (UNRESOLVED — pick up next session)
+
+**Branch:** `custom_foc`  **Files:** `custom_foc.c`, `custom_foc.h`, `esc_app.c`
+
+**Goal:** Eliminate grinding + stop-then-lurch at CROSSFADE→CLOSED_LOOP transition.
+
+**Status: NOT CLOSED.** After three iterations (v1, v2, v3) the behavior is still inconsistent.
+User's subjective assessment at end of day: "operation is less robust than before, even the tests
+this morning" — i.e., current code (v3) may have regressed from the Session 3 baseline.
+
+---
+
+##### v1 — Initial fix (2026-04-07 afternoon)
+
+Initial root-cause hypothesis: two independent problems at CL entry.
+
+1. **Grinding / slowdown during CROSSFADE** — `ekf_omega_pi` (τ=100ms LPF, feeds speed PI) was
+   not seeded at crossfade entry, starts lagged below actual OL speed.
+2. **Stop-then-lurch at CL entry** — `pi_spd.integral` reset to 0 + speed command jump from
+   1200 RPM to `u × max_speed_rpm` in one tick → PI error saturates Iq.
+
+**v1 fixes applied:**
+
+| Fix | File | Change |
+|---|---|---|
+| A — Bumpless PI entry | `custom_foc.c` | `pi_spd.integral = ol_Iq_ref` at CL entry instead of 0. |
+| B — Seed ekf_omega_pi | `custom_foc.c` | `ekf_omega_pi = ol_omega_e` at crossfade entry. |
+| C — Speed cmd to actual EKF | `custom_foc.c` | `spd_cmd_rpm = ekf_rpm` at CL entry — not `OL_TARGET_RPM`. |
+| D — ESC slew seeded to actual | `esc_app.c` | `esc_speed_cmd = CFOC_GetSpeedRPM()` on first CL tick. |
+
+**v1 ground test (bags 18_55_41, 18_57_14):** Still grinding. Correlation analysis showed:
+
+```
+Bag 18_55_41:  #1 RPM@CL=+459  Iq@CL=-0.03  ROUGH   ← impossible RPM drop
+               #5 RPM@CL=-1314 Iq@CL=-8.17  SMOOTH
+Bag 18_57_14:  #1 RPM@CL=+458  Iq@CL=-0.06  ROUGH
+               #2 RPM@CL=+1344 Iq@CL=+8.16  SMOOTH
+```
+
+Pattern: ~30% of transitions were SMOOTH (Iq@CL ≈ 8-10A, RPM near crossfade speed). The rest
+were ROUGH with RPM dropping from ~1440 to ~460 in the 100ms window at CL entry and Iq collapsing
+to zero — **physically impossible** inertia-wise, so it's a control artifact.
+
+##### v2 — EKF gate + correct PI seed (2026-04-07 evening)
+
+Code review revealed two bugs in v1:
+
+**Bug 1 — v1's Fix C used raw `ekf_rpm` (unfiltered):**
+The speed PI uses `ekf_omega_pi / RPM_TO_ERAD_S` as feedback (custom_foc.c:734). Seeding
+`spd_cmd_rpm = ekf_rpm` (raw) at 1200 RPM with Vdt/BEMF=98% could produce a large one-tick
+speed error that corrupts the PI integral (even though ESC overrides `spd_cmd_rpm` 1ms later).
+
+**Bug 2 — angle integration speed collapses at CL entry:**
+During CROSSFADE, angle uses `omega_blend = (1-α)×ol_omega_e + α×ekf_omega_filt`. In CLOSED_LOOP,
+it switches to pure `ekf_omega_filt`. If `ekf_omega_filt` has drifted low during the crossfade
+tail (as α→1 the `ol_omega_e` anchor disappears), the commutation angle suddenly slows → torque
+drops → motor physically decelerates. This explains the real (not just telemetry-aliased) RPM drop.
+
+**v2 fixes applied on top of v1:**
+
+| Fix | File | Change |
+|---|---|---|
+| E — EKF convergence gate | `custom_foc.c` | At end of crossfade, require `\|ekf_omega_filt - ol_omega_e\| < 20%` before entering CL. If not met, hold at `xf_blend_ms = CFOC_XF_DURATION_MS` (α=1.0) and wait. Hard cap: +500ms max extension. |
+| F — PI seed from filtered signal | `custom_foc.c` | `spd_cmd_rpm = ekf_omega_pi / RPM_TO_ERAD_S` (the PI's own feedback LPF) — guarantees `speed_err = 0` on first CL tick regardless of raw EKF noise. Replaces v1 Fix C. |
+
+**v2 ground test (bag 19_25_25):** Still inconsistent. 11 transitions, reverse worse than forward:
+
+```
+Forward:  #1 +1034/-0.05  #2 +1402/+3.38  #3 +429/-0.01  #4 +1319/+7.91  #5 +1551/+1.93
+Reverse:  #6  -920/+0.03  #7 -1023/+0.06  #8 -1403/-8.52 #9 -509/-0.03 #10 -1414/-9.50 #11 -464/+0.02
+```
+
+Of the 6 reverse transitions, 4 were rough (Iq ≈ 0). User observed: "grinding noise is worse
+in reverse" and "forward works with some help from joystick cmd". The EKF gate does limit the
+timing but can't prevent `ekf_omega_filt` from collapsing in the first 100ms of CL when the raw
+EKF estimate becomes noisy at 1200 RPM.
+
+##### v3 — Revert OL target to 1400 RPM (2026-04-07 late evening)
+
+**Decision:** At 1200 RPM, Vdt/BEMF ≈ 98% is the physics floor. The EKF simply cannot reliably
+estimate speed there. Session 3 validated 1400 RPM (Vdt/BEMF ≈ 84%, 16% margin) with 0 faults.
+Revert OL target to 1400, keep v2 fixes (E, F) and v1 fixes (A, B, D) as they are still
+unconditionally correct.
+
+**v3 change:** `CFOC_OL_TARGET_RPM: 1200 → 1400` (`custom_foc.h:75`).
+
+**v3 ground test (bags 19_38_44, 19_41_21):** User reports operation feels **worse** than
+morning Session 3/4 tests. Transition summary:
+
+```
+Bag 19_38_44 (v3, 1400 RPM):
+  #1 +1536/+3.84  partial    #2 -1579/-9.95 SMOOTH     #3  +490/-0.06 ROUGH
+  #4  +683/+9.90  WEIRD (Iq ok, RPM low)
+  #5 +1296/+0.12  ROUGH      #6  +537/+0.01 ROUGH
+
+Bag 19_41_21 (v3, 1400 RPM):
+  #1 -1202/+0.06  ROUGH (direction negative but Iq positive — sign inversion??)
+  #2  +682/-0.01  ROUGH
+```
+
+**Key anomaly in bag 19_41_21 #1:** motor speed is -1202 RPM (reverse) but Iq is +0.06 A
+(positive sign). Park transform or direction handling regression?
+
+---
+
+##### Current code state (end of 2026-04-07)
+
+| Location | State |
+|---|---|
+| `custom_foc.h:75` | `CFOC_OL_TARGET_RPM = 1400.0f` (reverted from 1200, v3) |
+| `custom_foc.c:657-658` | Fix B: `ekf_omega_filt = ekf_omega_pi = ol_omega_e` at crossfade entry |
+| `custom_foc.c:687-746` | Fix E (EKF gate) + Fix F (`spd_cmd_rpm = ekf_omega_pi / RPM_TO_ERAD_S`) + Fix A (`pi_spd.integral = ol_Iq_ref`) |
+| `esc_app.c:196-203` | Fix D: `esc_speed_cmd = CFOC_GetSpeedRPM()` on first CL tick |
+
+**None of these are validated.** The v3 state is what's in the tree right now.
+
+---
+
+##### Hypotheses to investigate next session
+
+1. **v2/v3 may have regressed from Session 3 baseline.** User's subjective feedback is the
+   most important data point: "less robust than morning". Session 3 bag 18_04_22 was the last
+   known-good ground test. Compare transitions there vs 19_38_44 quantitatively.
+   - **Action:** run `analyze_cl_transition.py` on bag 18_04_22 (Session 3) and diff against
+     19_38_44. If Session 3 had mostly smooth transitions, the regression is in v2 (Fix E or F).
+
+2. **The EKF gate (Fix E) may be holding crossfade too long.** Extending crossfade by up to
+   500ms keeps the motor at pure-EKF angle integration (α=1.0) for up to 1000ms total. If the
+   EKF is noisy during that extension, the angle accumulates error and torque degrades.
+   - **Action:** try disabling Fix E (skip the gate, commit at 500ms always) while keeping Fix F.
+
+3. **Fix F (`spd_cmd_rpm = ekf_omega_pi / RPM`) may interact badly with ESC overriding 1ms later.**
+   CFOC sets `spd_cmd_rpm` at CL entry → PI runs 1 tick with zero error → ESC overrides with
+   `CFOC_GetSpeedRPM()` which is `ekf_omega_filt / RPM_TO_ERAD_S` (a DIFFERENT LPF). On the
+   second tick, `speed_err = ekf_omega_filt/RPM − ekf_omega_pi/RPM` = the difference between
+   two LPFs of the same signal. Small but non-zero.
+   - **Action:** make CFOC and ESC use the SAME LPF. Either expose `ekf_omega_pi` via a new
+     getter and have ESC use it, or have CFOC seed from `ekf_omega_filt` instead.
+
+4. **Reverse-direction Iq sign inversion (bag 19_41_21 #1).** Telemetry shows Iq=+0.06 for a
+   motor running at -1202 RPM. Expected: Iq should have the direction sign. Is it a telemetry
+   reporting quirk (Iq_ma is signed but derived from Park with ol_theta_e which is already
+   direction-signed), or a real control issue?
+   - **Action:** inspect `esc_send_telemetry` in `esc_app.c` and the Park transform path.
+     Check if Iq reporting matches the direction convention used by ol_Iq_ref.
+
+5. **Hardware/mechanical factor.** "Reverse worse than forward" persisted across all v1/v2/v3
+   tests on the same hardware. Asymmetric motor characteristics (Ke, Rs, commutation) between
+   directions? Wheel friction at start? Bearing asymmetry?
+   - **Action:** bench-test at no-load both directions and compare. If no-load is symmetric,
+     the asymmetry is load/traction related. If no-load is also asymmetric, it's electrical.
+
+6. **Consider full revert to Session 3 baseline as a known-good fallback.** If tomorrow's
+   analysis confirms v2/v3 regressed, revert all v1/v2/v3 changes and restart from Session 3.
+   - `git diff 5f27d90 -- motor_test1_20260227/` shows exactly what changed since Session 3.
+
+---
+
+##### What to keep vs drop (my recommendation for tomorrow)
+
+| Change | Keep? | Rationale |
+|---|---|---|
+| v1 Fix A (`pi_spd.integral = ol_Iq_ref`) | **KEEP** | Unconditionally correct; zero downside |
+| v1 Fix B (`ekf_omega_pi = ol_omega_e` seed) | **KEEP** | Correct; matches v1 Fix A's intent |
+| v1 Fix C (`spd_cmd_rpm = ekf_rpm` raw) | **DROP** | Superseded by v2 Fix F |
+| v1 Fix D (`esc_speed_cmd = CFOC_GetSpeedRPM()`) | **REVIEW** | See hypothesis 3 — may conflict with Fix F |
+| v2 Fix E (EKF convergence gate) | **TEST WITHOUT IT** | Hypothesis 2 — may be causing worse behavior |
+| v2 Fix F (`spd_cmd_rpm = ekf_omega_pi / RPM`) | **REVIEW** | See hypothesis 3 |
+| v3 (`CFOC_OL_TARGET_RPM = 1400`) | **KEEP** | Physics-motivated; 1200 was too close to floor |
+
+**Recommended first experiment tomorrow:** disable Fix E (EKF gate), keep everything else at v3
+state, ground test. If that recovers Session 3 reliability, the gate is the regression. If not,
+move to hypothesis 3 (align CFOC/ESC on the same LPF).
+
+---
+
+##### Relevant rosbag inventory
+
+| Bag | Context | Key result |
+|---|---|---|
+| `rosbag2_2026_04_07-17_57_34` | Session 3 bench (1400 RPM, circle limiter fix) | 0 faults |
+| `rosbag2_2026_04_07-18_04_22` | Session 3 ground (1400 RPM) | **Last known-good baseline** |
+| `rosbag2_2026_04_07-18_39_58` | Session 4 ground (1200 RPM) | Worked but grinding reported |
+| `rosbag2_2026_04_07-18_42_33` | Session 4 ground (1200 RPM) | Same |
+| `rosbag2_2026_04_07-18_55_41` | Session 5 v1 ground | Still grinding; 4/5 rough |
+| `rosbag2_2026_04_07-18_57_14` | Session 5 v1 ground | 5/7 rough |
+| `rosbag2_2026_04_07-19_25_25` | Session 5 v2 ground (1200 RPM + gate + Fix F) | 4/6 reverse rough |
+| `rosbag2_2026_04_07-19_38_44` | Session 5 v3 ground (1400 RPM + gate + Fix F) | 4/6 rough; user says worse feel |
+| `rosbag2_2026_04_07-19_41_21` | Session 5 v3 ground | 2/2 rough; Iq sign anomaly #1 |
+
+Analysis tool: `tests/analyze_cl_transition.py <bag_dir>`
 
 ---
 
