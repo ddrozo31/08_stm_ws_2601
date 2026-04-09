@@ -73,6 +73,12 @@
 #define ESC_CFG_PARAM_OL_RAMP   0x07U  /*!< OL speed ramp duration [ms]        */
 #define ESC_CFG_PARAM_ALIGN_MS  0x08U  /*!< Alignment duration [ms]            */
 #define ESC_CFG_PARAM_ALIGN_ID  0x09U  /*!< Alignment d-axis current [A × 0.1] */
+#define ESC_CFG_PARAM_XF_DUR   0x0AU  /*!< Crossfade blend duration [ms]      */
+#define ESC_CFG_PARAM_XF_DWELL 0x0BU  /*!< Crossfade dwell time [ms]          */
+#define ESC_CFG_PARAM_OL_RPM   0x0CU  /*!< OL target / crossfade speed [RPM]  */
+#define ESC_CFG_PARAM_SPD_KP   0x0DU  /*!< Speed PI Kp [× 0.001 A/RPM]       */
+#define ESC_CFG_PARAM_SPD_KI   0x0EU  /*!< Speed PI Ki [× 0.0001 A/RPM]      */
+#define ESC_CFG_PARAM_SPD_LPF  0x0FU  /*!< Speed PI LPF alpha [× 0.0001]     */
 
 /* Initialise the layer and enable the USART2 RXNE interrupt. */
 void    ESC_COMM_Init(void);
@@ -107,6 +113,12 @@ float   ESC_COMM_GetOlIqA(void);       /*!< OL Iq target (A) or -1 if not set */
 float   ESC_COMM_GetOlRampMs(void);    /*!< OL ramp duration (ms) or -1 if not set */
 float   ESC_COMM_GetAlignMs(void);     /*!< Alignment duration (ms) or -1 if not set */
 float   ESC_COMM_GetAlignIdA(void);    /*!< Alignment Id (A) or -1 if not set */
+float   ESC_COMM_GetXfDurationMs(void); /*!< Crossfade duration (ms) or -1    */
+float   ESC_COMM_GetXfDwellMs(void);   /*!< Crossfade dwell (ms) or -1       */
+float   ESC_COMM_GetOlTargetRPM(void); /*!< OL target speed (RPM) or -1      */
+float   ESC_COMM_GetSpdKp(void);       /*!< Speed PI Kp (A/RPM) or -1        */
+float   ESC_COMM_GetSpdKi(void);       /*!< Speed PI Ki (A/RPM) or -1        */
+float   ESC_COMM_GetSpdLpfAlpha(void); /*!< Speed PI LPF alpha or -1         */
 
 /* Call from USART2_IRQHandler USER CODE BEGIN 0 -- processes one RXNE byte. */
 void    ESC_COMM_UART_RxISR(void);

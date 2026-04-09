@@ -81,6 +81,14 @@ void ESC_APP_Tick(void)
 
     CFOC_SetStartupParams(ESC_COMM_GetOlIqA(), ESC_COMM_GetOlRampMs(),
                           ESC_COMM_GetAlignMs(), ESC_COMM_GetAlignIdA());
+
+    CFOC_SetCrossfadeParams(ESC_COMM_GetXfDurationMs(),
+                            ESC_COMM_GetXfDwellMs(),
+                            ESC_COMM_GetOlTargetRPM());
+
+    CFOC_SetSpeedPIParams(ESC_COMM_GetSpdKp(),
+                          ESC_COMM_GetSpdKi(),
+                          ESC_COMM_GetSpdLpfAlpha());
   }
 
   /* ── Read command ─────��─────────────────────────────��──────────────── */

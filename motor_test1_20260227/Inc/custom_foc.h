@@ -240,6 +240,18 @@ void CFOC_SetIqLimit(float iq_max);
 void CFOC_SetStartupParams(float ol_iq_a, float ol_ramp_ms,
                             float align_ms, float align_id_a);
 
+/** Set crossfade parameters at runtime (0 or negative = keep current value).
+ *  @param xf_dur_ms   Crossfade blend duration [ms].
+ *  @param xf_dwell_ms BEMF dwell time before crossfade [ms].
+ *  @param ol_rpm      Open-loop target / crossfade speed [RPM]. */
+void CFOC_SetCrossfadeParams(float xf_dur_ms, float xf_dwell_ms, float ol_rpm);
+
+/** Set speed PI tuning at runtime (0 or negative = keep current value).
+ *  @param kp        Speed PI Kp [A/RPM].
+ *  @param ki        Speed PI Ki [A/RPM], already discretized (× MF_Ts).
+ *  @param lpf_alpha Speed PI feedback LPF alpha (EKF speed filter). */
+void CFOC_SetSpeedPIParams(float kp, float ki, float lpf_alpha);
+
 /** Get measured d-q currents from most recent HF cycle.
  *  @param[out] iq  q-axis current [A].
  *  @param[out] id  d-axis current [A]. */

@@ -48,6 +48,12 @@ static volatile float esc_cfg_ol_iq_a     = -1.0f;
 static volatile float esc_cfg_ol_ramp_ms  = -1.0f;
 static volatile float esc_cfg_align_ms    = -1.0f;
 static volatile float esc_cfg_align_id_a  = -1.0f;
+static volatile float esc_cfg_xf_dur_ms   = -1.0f;
+static volatile float esc_cfg_xf_dwell_ms = -1.0f;
+static volatile float esc_cfg_ol_rpm      = -1.0f;
+static volatile float esc_cfg_spd_kp      = -1.0f;
+static volatile float esc_cfg_spd_ki      = -1.0f;
+static volatile float esc_cfg_spd_lpf     = -1.0f;
 
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */
@@ -115,6 +121,24 @@ float ESC_COMM_GetAlignMs(void) { return esc_cfg_align_ms; }
 
 /** @brief Alignment d-axis current (A), or -1 if not configured. */
 float ESC_COMM_GetAlignIdA(void) { return esc_cfg_align_id_a; }
+
+/** @brief Crossfade blend duration (ms) or -1 if not configured. */
+float ESC_COMM_GetXfDurationMs(void) { return esc_cfg_xf_dur_ms; }
+
+/** @brief Crossfade dwell time (ms) or -1 if not configured. */
+float ESC_COMM_GetXfDwellMs(void) { return esc_cfg_xf_dwell_ms; }
+
+/** @brief OL target / crossfade speed (RPM) or -1 if not configured. */
+float ESC_COMM_GetOlTargetRPM(void) { return esc_cfg_ol_rpm; }
+
+/** @brief Speed PI Kp (A/RPM) or -1 if not configured. */
+float ESC_COMM_GetSpdKp(void) { return esc_cfg_spd_kp; }
+
+/** @brief Speed PI Ki (A/RPM, discretized) or -1 if not configured. */
+float ESC_COMM_GetSpdKi(void) { return esc_cfg_spd_ki; }
+
+/** @brief Speed PI LPF alpha or -1 if not configured. */
+float ESC_COMM_GetSpdLpfAlpha(void) { return esc_cfg_spd_lpf; }
 
 /* -------------------------------------------------------------------------- */
 /* Command accessors                                                           */
@@ -308,6 +332,54 @@ static void ESC_COMM_ProcessByte(uint8_t byte)
             if ((val >= 10) && (val <= 150))
             {
               esc_cfg_align_id_a = (float)val * 0.1f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_XF_DUR)
+          {
+            /* val = int16_t ms; valid range 100–1000 */
+            if ((val >= 100) && (val <= 1000))
+            {
+              esc_cfg_xf_dur_ms = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_XF_DWELL)
+          {
+            /* val = int16_t ms; valid range 50–500 */
+            if ((val >= 50) && (val <= 500))
+            {
+              esc_cfg_xf_dwell_ms = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_OL_RPM)
+          {
+            /* val = int16_t RPM; valid range 1000–2000 */
+            if ((val >= 1000) && (val <= 2000))
+            {
+              esc_cfg_ol_rpm = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_SPD_KP)
+          {
+            /* val = int16_t × 0.001 A/RPM; valid range 5–50 (0.005–0.050) */
+            if ((val >= 5) && (val <= 50))
+            {
+              esc_cfg_spd_kp = (float)val * 0.001f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_SPD_KI)
+          {
+            /* val = int16_t × 0.0001 A/RPM; valid range 5–50 (0.0005–0.0050) */
+            if ((val >= 5) && (val <= 50))
+            {
+              esc_cfg_spd_ki = (float)val * 0.0001f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_SPD_LPF)
+          {
+            /* val = int16_t × 0.0001; valid range 2–20 (0.0002–0.0020) */
+            if ((val >= 2) && (val <= 20))
+            {
+              esc_cfg_spd_lpf = (float)val * 0.0001f;
             }
           }
           /* Unknown param_id: silently ignore. */

@@ -50,8 +50,20 @@ Two files own USART2 exclusively — ASPEP/MCP is disabled:
 - `param_id 0x01` = max_iq_a: `int16_t` × 0.1 A (e.g. 120 = 12.0 A, range 10–150)
 - `param_id 0x02` = revup_rpm: `int16_t` RPM (range 1600–5000)
 - `param_id 0x03` = boost_iq_a: `int16_t` × 0.1 A (range 10–150)
+- `param_id 0x04` = max_speed_rpm: `int16_t` RPM (range 1000–10000)
+- `param_id 0x05` = iq_limit_a: `int16_t` × 0.1 A (range 10–200)
+- `param_id 0x06` = ol_iq_a: `int16_t` × 0.1 A (range 20–150)
+- `param_id 0x07` = ol_ramp_ms: `int16_t` ms (range 1000–8000)
+- `param_id 0x08` = align_ms: `int16_t` ms (range 100–2000)
+- `param_id 0x09` = align_id_a: `int16_t` × 0.1 A (range 10–150)
+- `param_id 0x0A` = xf_duration_ms: `int16_t` ms (crossfade blend, range 100–1000)
+- `param_id 0x0B` = xf_dwell_ms: `int16_t` ms (crossfade dwell, range 50–500)
+- `param_id 0x0C` = ol_target_rpm: `int16_t` RPM (OL/crossfade speed, range 1000–2000)
+- `param_id 0x0D` = spd_kp: `int16_t` × 0.001 A/RPM (speed PI Kp, range 5–50)
+- `param_id 0x0E` = spd_ki: `int16_t` × 0.0001 A/RPM (speed PI Ki, range 5–50)
+- `param_id 0x0F` = spd_lpf_alpha: `int16_t` × 0.0001 (speed PI LPF, range 2–20)
 - Sent once at startup by RPi5; firmware uses compile-time defaults if never received
-- Values stored in `volatile float` RAM vars; read by `mc_app_hooks.c` on every hook cycle
+- Values stored in `volatile float` RAM vars; read by `esc_app.c` on every tick
 
 **Telemetry frame (STM32 → RPi5, 15 bytes):** `[0xBB][spd_lo][spd_hi][esc_st][faults][u_lo][u_hi][v_lo][v_hi][iq_lo][iq_hi][id_lo][id_hi][mc_st][XOR_chk]`
 - `speed` = `int16_t` RPM, `esc_st` = ESC_State_t byte, `faults` = lower byte of fault bitmask

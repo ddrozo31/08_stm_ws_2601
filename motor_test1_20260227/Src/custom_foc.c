@@ -138,6 +138,14 @@ static volatile uint32_t cfg_ol_ramp_ms = CFOC_OL_RAMP_MS;
 static volatile uint32_t cfg_align_ms   = CFOC_ALIGN_MS;
 static volatile float  cfg_align_id     = CFOC_ALIGN_ID;
 
+/* ── Runtime crossfade parameters (overridable via ESC 0xCC config) ─── */
+static volatile uint32_t cfg_xf_duration_ms = CFOC_XF_DURATION_MS;
+static volatile uint32_t cfg_xf_dwell_ms    = CFOC_XF_DWELL_MS;
+static volatile float    cfg_ol_target_rpm  = CFOC_OL_TARGET_RPM;
+
+/* ── Runtime speed PI LPF alpha (overridable via ESC 0xCC config) ───── */
+static volatile float cfg_spd_pi_lpf_alpha = CFOC_EKF_SPD_PI_LPF_ALPHA;
+
 /* ── Inline helpers ─────────────────────────────────────────────────────── */
 
 /** Run PI controller with conditional-integration antiwindup.
@@ -443,7 +451,7 @@ void CFOC_HighFrequencyTask(void)
     /* Speed crossfade: blend angular velocity (OL→EKF), not angle.
      * This avoids any angle discontinuity — the angle is always
      * integrated smoothly at 25 kHz from the blended speed. */
-    float alpha = (float)xf_blend_ms / (float)CFOC_XF_DURATION_MS;
+    float alpha = (float)xf_blend_ms / (float)cfg_xf_duration_ms;
     if (alpha > 1.0f) alpha = 1.0f;
     float omega_blend = (1.0f - alpha) * ol_omega_e + alpha * ekf_omega_filt;
 
@@ -561,7 +569,7 @@ void CFOC_HighFrequencyTask(void)
     /* τ=20ms LPF — angle integration and telemetry */
     ekf_omega_filt += CFOC_EKF_SPEED_LPF_ALPHA  * (omega_raw - ekf_omega_filt);
     /* τ=100ms LPF — speed PI feedback (smoother, less noise-driven Iq chattering) */
-    ekf_omega_pi   += CFOC_EKF_SPD_PI_LPF_ALPHA * (omega_raw - ekf_omega_pi);
+    ekf_omega_pi   += cfg_spd_pi_lpf_alpha * (omega_raw - ekf_omega_pi);
   }
 
   isr_count++;
@@ -632,7 +640,7 @@ void CFOC_MediumFrequencyTask(void)
     float speed_frac = (float)ol_ramp_ms / (float)cfg_ol_ramp_ms;
     if (speed_frac > 1.0f) speed_frac = 1.0f;
 
-    float target_rpm = CFOC_OL_TARGET_RPM * speed_frac;
+    float target_rpm = cfg_ol_target_rpm * speed_frac;
     ol_omega_e = target_rpm * RPM_TO_ERAD_S * (float)ol_direction;
 
     /* Current ramp: 0 → Iq_target over CFOC_OL_IQ_RAMP_MS */
@@ -647,7 +655,7 @@ void CFOC_MediumFrequencyTask(void)
     if (ol_ramp_ms >= cfg_ol_ramp_ms)
     {
       xf_dwell_ms++;
-      if (xf_dwell_ms >= CFOC_XF_DWELL_MS)
+      if (xf_dwell_ms >= cfg_xf_dwell_ms)
       {
         /* Begin speed crossfade. Seed the LPF with OL speed for smooth start. */
         xf_blend_ms = 0U;
@@ -678,9 +686,9 @@ void CFOC_MediumFrequencyTask(void)
     ol_ramp_ms++;
     float speed_frac = (float)ol_ramp_ms / (float)cfg_ol_ramp_ms;
     if (speed_frac > 1.0f) speed_frac = 1.0f;
-    ol_omega_e = CFOC_OL_TARGET_RPM * speed_frac * RPM_TO_ERAD_S * (float)ol_direction;
+    ol_omega_e = cfg_ol_target_rpm * speed_frac * RPM_TO_ERAD_S * (float)ol_direction;
 
-    if (xf_blend_ms >= CFOC_XF_DURATION_MS)
+    if (xf_blend_ms >= cfg_xf_duration_ms)
     {
       /* Crossfade complete — fully EKF-driven.
        * Clamp speed PI to motoring torque only (no regen braking).
@@ -693,8 +701,10 @@ void CFOC_MediumFrequencyTask(void)
         pi_spd.out_min = -cfoc_iq_limit;
         pi_spd.out_max = 0.0f;
       }
-      pi_spd.integral = 0.0f;
-      spd_cmd_rpm = CFOC_OL_TARGET_RPM * (float)ol_direction;
+      /* Bumpless transfer: seed PI integral with last OL torque so there is
+       * no torque dip at CL entry. The PI starts from where OL left off. */
+      pi_spd.integral = ol_Iq_ref;
+      spd_cmd_rpm = cfg_ol_target_rpm * (float)ol_direction;
       cfoc_state = CFOC_CLOSED_LOOP;
     }
 
@@ -875,6 +885,20 @@ void CFOC_SetStartupParams(float ol_iq_a, float ol_ramp_ms,
   if (ol_ramp_ms > 0.0f)  cfg_ol_ramp_ms  = (uint32_t)ol_ramp_ms;
   if (align_ms > 0.0f)    cfg_align_ms    = (uint32_t)align_ms;
   if (align_id_a > 0.0f)  cfg_align_id    = align_id_a;
+}
+
+void CFOC_SetCrossfadeParams(float xf_dur_ms, float xf_dwell_ms, float ol_rpm)
+{
+  if (xf_dur_ms > 0.0f)   cfg_xf_duration_ms = (uint32_t)xf_dur_ms;
+  if (xf_dwell_ms > 0.0f) cfg_xf_dwell_ms    = (uint32_t)xf_dwell_ms;
+  if (ol_rpm > 0.0f)      cfg_ol_target_rpm   = ol_rpm;
+}
+
+void CFOC_SetSpeedPIParams(float kp, float ki, float lpf_alpha)
+{
+  if (kp > 0.0f)        pi_spd.Kp = kp;
+  if (ki > 0.0f)        pi_spd.Ki = ki;
+  if (lpf_alpha > 0.0f) cfg_spd_pi_lpf_alpha = lpf_alpha;
 }
 
 void CFOC_GetIqd(float *iq, float *id)
