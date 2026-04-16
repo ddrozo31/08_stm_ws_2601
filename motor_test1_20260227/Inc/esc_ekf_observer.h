@@ -67,6 +67,8 @@ typedef struct {
     float _rpm_scale; /*!< 60/(2π×p) — RPM conversion constant          */
     float _Q[4];      /*!< Process noise diagonal [q_i, q_i, q_e, q_e] */
     float _R;         /*!< Measurement noise (both channels equal) r_i  */
+    /* Diagnostics — populated by EKF_Update, read via EKF_GetInnovMag */
+    float innov_mag_lpf; /*!< LPF magnitude of the current innovation [A] */
 } EKF_Handle_t;
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
@@ -115,6 +117,20 @@ float EKF_GetAngle(const EKF_Handle_t *h);
  * @return Mechanical speed in RPM (always positive; sign from direction).
  */
 float EKF_GetSpeedRPM(const EKF_Handle_t *h);
+
+/**
+ * @brief  EKF_GetInnovMag — LPF magnitude of the innovation (|y_meas - y_pred|).
+ *
+ * Low-passed magnitude of the α/β current innovation (residual) from the last
+ * EKF_Update calls. Grows sharply when the observer model diverges from reality
+ * (e.g. rotor stalled against external load while observer hallucinates a
+ * spinning BEMF). Use as a stall-detection signal in CLOSED_LOOP.
+ *
+ * Units: Amps (α/β-frame current residual).
+ *
+ * @return Filtered innovation magnitude in Amps.
+ */
+float EKF_GetInnovMag(const EKF_Handle_t *h);
 
 /**
  * @brief  EKF_GetAngleMCSdk — angle in MCSDK int16 format.

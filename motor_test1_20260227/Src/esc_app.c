@@ -55,9 +55,27 @@ static void esc_send_telemetry(float u)
   int16_t  iq_ma   = (int16_t)(iq * 1000.0f);
   int16_t  id_ma   = (int16_t)(id * 1000.0f);
   uint8_t  cfoc_st = (uint8_t)CFOC_GetState();
+  float    innov_a = CFOC_GetInnovMag();
+  float    inv_scaled = innov_a * 1000.0f;
+  if (inv_scaled < 0.0f)       inv_scaled = 0.0f;
+  if (inv_scaled > 65535.0f)   inv_scaled = 65535.0f;
+  uint16_t innov_x1000 = (uint16_t)inv_scaled;
+
+  float    kappa   = CFOC_GetLockKappa();
+  float    k_scaled = kappa * 10000.0f;
+  if (k_scaled < 0.0f)     k_scaled = 0.0f;
+  if (k_scaled > 65535.0f) k_scaled = 65535.0f;
+  uint16_t kappa_x10000 = (uint16_t)k_scaled;
+
+  float    residual = CFOC_GetLockResidual();
+  float    r_scaled = residual * 1000.0f;
+  if (r_scaled < 0.0f)     r_scaled = 0.0f;
+  if (r_scaled > 65535.0f) r_scaled = 65535.0f;
+  uint16_t res_x1000 = (uint16_t)r_scaled;
 
   ESC_COMM_SendTelemetry(spd_rpm, esc_st, fault_b, cmd_raw, vbus_v,
-                         iq_ma, id_ma, cfoc_st);
+                         iq_ma, id_ma, cfoc_st, innov_x1000,
+                         kappa_x10000, res_x1000);
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

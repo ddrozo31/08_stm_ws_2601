@@ -125,6 +125,46 @@ static volatile float   cfoc_torque_iq   = 0.0f;
 /* ── Runtime Iq limit (overrides CFOC_PI_SPD_IQ_MAX if set) ──────────── */
 static volatile float cfoc_iq_limit = CFOC_PI_SPD_IQ_MAX;
 
+/* ── CL stall watchdog (observer-hallucination detector) ─────────────────
+ * Ground tests (2026-04-15) showed CLOSED_LOOP states where telemetry
+ * reported 3000 RPM with Iq pegged at the limit but the vehicle
+ * accelerometer showed zero net motion — rotor stalled against load
+ * while the EKF hallucinated a spinning BEMF. The EKF innovation magnitude
+ * (|y_meas - y_pred|, from EKF_GetInnovMag) grows in this condition because
+ * predicted currents no longer match measurement. It's a stall signal that
+ * is decoupled from the lying speed output.
+ *
+ * Thresholds are a starting point — calibrate from the first bench+ground
+ * capture with innov_x1000 logging (healthy CL vs stalled CL).
+ *
+ * DISARMED 2026-04-15: calibration bags (18_05_14 bench, 18_07_30/18_10_01
+ * ground) showed healthy CL peaks at 0.31 A and stalled CL peaks at 0.27 A —
+ * distributions overlap completely. The EKF's adaptive BEMF process noise
+ * (q_e) lets the filter drift to self-consistency with its own hallucination,
+ * so innovation is NOT a discriminating signal here. Threshold set well above
+ * any observed value so the watchdog never trips; replaced by a node-side
+ * IMU watchdog (chassis accelerometer is physical ground truth). Revisit
+ * under Step 8 (adaptive-R EKF rewrite). */
+#define CFOC_STALL_INNOV_A     99.0f  /* LPF innovation magnitude [A] — DISARMED */
+#define CFOC_STALL_HOLD_MS     300U   /* must persist before fault */
+#define CFOC_STALL_CLEAR_MS    100U   /* below-threshold time to reset */
+static volatile uint32_t cfoc_stall_hold_ms  = 0U;
+static volatile uint32_t cfoc_stall_clear_ms = 0U;
+
+/* ── Lock-confidence signals (Step 8-B, diagnostic-only in this commit) ──
+ * κ  = |Iq| / max(|ω_e|, ω_min) — mechanical admittance. Healthy CL: bounded
+ *      band scaling with load. Rotor decoupled: Iq saturates while ω_e stays
+ *      high (observer hallucination) → κ leaves the band.
+ * r  = |Vq_cmd − (Rs·Iq + Ψf·ω_e)| — voltage-balance residual. Catches pure
+ *      observer drift. Sensitive to Rs/Ψf temperature drift (tolerated because
+ *      the production gate will AND κ and r).
+ * Both LPF'd at α=0.01 (τ≈100 ms at 1 kHz). Gate logic is not wired yet;
+ * signals are exposed via accessors and telemetry for shape calibration. */
+#define CFOC_LOCK_LPF_ALPHA   0.01f
+#define CFOC_LOCK_OMEGA_MIN   10.0f    /* [elec rad/s], matches EKF floor */
+static volatile float cfoc_lock_kappa_lpf    = 0.0f;
+static volatile float cfoc_lock_residual_lpf = 0.0f;
+
 /* ── Runtime Vbus + dead-time voltage (updated from measured Vbus every 100ms) ── */
 /* cfoc_vbus_rt: measured DC bus voltage [V] — used for SVM normalization and OVM ceiling.
  * cfoc_vdt_rt:  Vbus × CFOC_VDT_PER_VBUS — dead-time drop fed to EKF voltage model.
@@ -597,6 +637,21 @@ void CFOC_MediumFrequencyTask(void)
     }
   }
 
+  /* ── Lock-confidence signals (Step 8-B diagnostic; no gate yet) ─────
+   * Computed every MF tick in all states. In IDLE Iq≈0 → κ≈0, r small.
+   * Meaningful only from CL entry onward; node is responsible for windowing. */
+  {
+    float om = ekf_omega_filt;
+    float om_abs = om >= 0.0f ? om : -om;
+    if (om_abs < CFOC_LOCK_OMEGA_MIN) om_abs = CFOC_LOCK_OMEGA_MIN;
+    float iq_abs = dbg_Iq >= 0.0f ? dbg_Iq : -dbg_Iq;
+    float kappa  = iq_abs / om_abs;
+    float rterm  = dbg_Vq - (CFOC_RS * dbg_Iq + CFOC_PSI_F * om);
+    float r_abs  = rterm >= 0.0f ? rterm : -rterm;
+    cfoc_lock_kappa_lpf    += CFOC_LOCK_LPF_ALPHA * (kappa - cfoc_lock_kappa_lpf);
+    cfoc_lock_residual_lpf += CFOC_LOCK_LPF_ALPHA * (r_abs - cfoc_lock_residual_lpf);
+  }
+
   /* ── ALIGNMENT phase: wait for rotor to lock, then transition ──────── */
   if (cfoc_state == CFOC_ALIGNMENT)
   {
@@ -729,6 +784,28 @@ void CFOC_MediumFrequencyTask(void)
       ol_Iq_ref = PI_Run(&pi_spd, speed_err);
     }
     ol_Id_ref = CFOC_OL_ID_REF;
+
+    /* Stall watchdog: EKF innovation stays high → model disagrees with
+     * measurement → rotor is not where the observer thinks it is.
+     * Faulting here hands control back to esc_app which performs the
+     * usual 500 ms back-off + auto-restart (same path as wrong-angle). */
+    {
+      float innov = EKF_GetInnovMag(&ekf);
+      if (innov > CFOC_STALL_INNOV_A) {
+        cfoc_stall_clear_ms = 0U;
+        if (++cfoc_stall_hold_ms >= CFOC_STALL_HOLD_MS) {
+          cfoc_stall_hold_ms  = 0U;
+          cfoc_state = CFOC_FAULT;
+        }
+      } else {
+        if (cfoc_stall_hold_ms > 0U) {
+          if (++cfoc_stall_clear_ms >= CFOC_STALL_CLEAR_MS) {
+            cfoc_stall_hold_ms  = 0U;
+            cfoc_stall_clear_ms = 0U;
+          }
+        }
+      }
+    }
     goto log_sample;
   }
 
@@ -756,6 +833,13 @@ log_sample:
     cfoc_log[idx].ekf_theta_x10 = (int16_t)(ekf_theta_e * (1800.0f / PI_F));
     cfoc_log[idx].ekf_rpm      = (int16_t)ekf_rpm;
     cfoc_log[idx].Iq_ref_x100  = (int16_t)(ol_Iq_ref * 100.0f);
+    {
+      float innov = EKF_GetInnovMag(&ekf);
+      float scaled = innov * 1000.0f;
+      if (scaled < 0.0f) scaled = 0.0f;
+      if (scaled > 65535.0f) scaled = 65535.0f;
+      cfoc_log[idx].innov_x1000 = (uint16_t)scaled;
+    }
     cfoc_log_idx = idx + 1U;
   }
 log_done: (void)0;
@@ -764,6 +848,21 @@ log_done: (void)0;
 CFOC_State_t CFOC_GetState(void)
 {
   return cfoc_state;
+}
+
+float CFOC_GetInnovMag(void)
+{
+  return EKF_GetInnovMag(&ekf);
+}
+
+float CFOC_GetLockKappa(void)
+{
+  return cfoc_lock_kappa_lpf;
+}
+
+float CFOC_GetLockResidual(void)
+{
+  return cfoc_lock_residual_lpf;
 }
 
 void CFOC_Start(int8_t direction)
@@ -776,6 +875,10 @@ void CFOC_Start(int8_t direction)
   ol_omega_e  = 0.0f;
   ol_Iq_ref   = 0.0f;
   ol_Id_ref   = 0.0f;
+  cfoc_stall_hold_ms  = 0U;
+  cfoc_stall_clear_ms = 0U;
+  cfoc_lock_kappa_lpf    = 0.0f;
+  cfoc_lock_residual_lpf = 0.0f;
   ol_ramp_ms  = 0U;
   align_ms    = 0U;
   ol_direction = (direction >= 0) ? 1 : -1;

@@ -211,6 +211,15 @@ void EKF_Update(EKF_Handle_t *h,
     float yi0 = ia_m - ia_p;
     float yi1 = ib_m - ib_p;
 
+    /* Stall-detection diagnostic: LPF of |innovation|.
+     * τ≈50 ms at 1 kHz call rate (α=0.02) — fast enough to react inside
+     * 200–300 ms watchdog window, slow enough to reject single-tick spikes
+     * from PWM current ripple. Healthy CL: < ~0.3 A. Stall/desync: > ~1–2 A. */
+    {
+        float mag = sqrtf(yi0 * yi0 + yi1 * yi1);
+        h->innov_mag_lpf += 0.02f * (mag - h->innov_mag_lpf);
+    }
+
     /* ── 7. S = H×P_pred×Hᵀ + R  (H extracts rows 0,1 → top-left 2×2) ─── */
     float s00 = pp00 + h->_R;
     float s01 = pp01;           /* S is symmetric: s01 = s10 */
@@ -285,6 +294,11 @@ float EKF_GetSpeedRPM(const EKF_Handle_t *h)
     float ea = h->x[2], eb = h->x[3];
     /* ω_e = √(eα²+eβ²)/Ψf [elec rad/s],  RPM_mech = ω_e × 60/(2π×p) */
     return sqrtf(ea * ea + eb * eb) * h->_inv_psi * h->_rpm_scale;
+}
+
+float EKF_GetInnovMag(const EKF_Handle_t *h)
+{
+    return h->innov_mag_lpf;
 }
 
 int16_t EKF_GetAngleMCSdk(const EKF_Handle_t *h)

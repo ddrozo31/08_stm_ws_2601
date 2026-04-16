@@ -489,8 +489,9 @@ __weak void MC_APP_PostMediumFrequencyHook_M1(void)
     int16_t  id_ma   = (int16_t)(iqd.d * 1000.0f);
     uint8_t  mc_st   = (uint8_t)mci_st;
 
+    /* Debug/MCSDK build: custom EKF not running → innov meaningless, send 0. */
     ESC_COMM_SendTelemetry(spd_rpm, esc_st, fault_b, cmd_raw, vbus_v,
-                           iq_ma, id_ma, mc_st);
+                           iq_ma, id_ma, mc_st, 0U, 0U, 0U);
   }
 
 /* USER SECTION BEGIN PostMediumFrequencyHookM1 */

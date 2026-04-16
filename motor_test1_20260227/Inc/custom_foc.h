@@ -187,7 +187,8 @@ typedef struct __attribute__((packed)) {
   int16_t  ekf_theta_x10; /* EKF estimated angle [deg] × 10 */
   int16_t  ekf_rpm;      /* EKF estimated speed [RPM] (signed) */
   int16_t  Iq_ref_x100;  /* Iq reference from speed PI [A] × 100 */
-} CFOC_LogEntry_t;       /* 19 bytes per entry, 19 KB total */
+  uint16_t innov_x1000;  /* EKF innovation LPF magnitude [A] × 1000 (stall diag) */
+} CFOC_LogEntry_t;       /* 21 bytes per entry, 21 KB total */
 
 extern volatile CFOC_LogEntry_t cfoc_log[CFOC_LOG_SIZE];
 extern volatile uint32_t cfoc_log_idx;
@@ -206,6 +207,16 @@ void CFOC_MediumFrequencyTask(void);
 
 /** Get current motor state. */
 CFOC_State_t CFOC_GetState(void);
+
+/** LPF magnitude of the EKF current innovation [A]. Stall-detection diag. */
+float CFOC_GetInnovMag(void);
+
+/** Lock-confidence κ = |Iq| / max(|ω_e|, ω_min) [A·s/rad]. LPF τ≈100ms.
+ *  Diagnostic-only in this build (no gate wired). */
+float CFOC_GetLockKappa(void);
+
+/** Lock-confidence voltage-balance residual |Vq - (Rs·Iq + Ψf·ω_e)| [V]. LPF τ≈100ms. */
+float CFOC_GetLockResidual(void);
 
 /** Command motor start (from ESC layer). direction: +1 or -1. */
 void CFOC_Start(int8_t direction);

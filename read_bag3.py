@@ -13,6 +13,8 @@ BAG = sys.argv[1] if len(sys.argv) > 1 else (
 
 TOPICS = {
     "/esc/command", "/esc/speed_rpm", "/esc/state", "/esc/mcsdk_state",
+    "/esc/cfoc_state", "/esc/innov_a",
+    "/esc/lock_kappa", "/esc/lock_residual",
     "/esc/faults",  "/esc/vbus_v",   "/esc/iq_ma", "/esc/id_ma",
     "/imu/data_raw",
 }
@@ -45,6 +47,10 @@ DESER = {
     "/esc/speed_rpm":  cdr_int16,
     "/esc/state":      cdr_string,
     "/esc/mcsdk_state":cdr_string,
+    "/esc/cfoc_state": cdr_string,
+    "/esc/innov_a":    cdr_float32,
+    "/esc/lock_kappa":    cdr_float32,
+    "/esc/lock_residual": cdr_float32,
     "/esc/faults":     cdr_string,
     "/esc/vbus_v":     cdr_float32,
     "/esc/iq_ma":      cdr_int16,
@@ -82,7 +88,7 @@ def nearest(series, t):
 spd_data   = records.get("/esc/speed_rpm",   [])
 cmd_data   = records.get("/esc/command",     [])
 state_data = records.get("/esc/state",       [])
-mc_data    = records.get("/esc/mcsdk_state", [])
+mc_data    = records.get("/esc/cfoc_state", []) or records.get("/esc/mcsdk_state", [])
 iq_data    = records.get("/esc/iq_ma",       [])
 id_data    = records.get("/esc/id_ma",       [])
 imu_data   = records.get("/imu/data_raw",    [])
@@ -147,7 +153,29 @@ for t, flt in flt_data:
         prev_flt = flt
 
 # ---- Did observer ever reach RUN? -------------------------------------------
-run_entries = [(t, v) for t, v in mc_data if v == "RUN"]
+run_entries = [(t, v) for t, v in mc_data if v in ("RUN", "CLOSED_LOOP", "CL")]
+
+# ---- CL→IDLE loss analysis (observer-loss vs user-release) -----------------
+print(f"\n=== CL→IDLE transitions (speed trajectory before loss) ===")
+cl_states = ("RUN", "CLOSED_LOOP", "CL")
+prev = None
+for i, (t, mc) in enumerate(mc_data):
+    if prev in cl_states and mc == "IDLE":
+        u_now = nearest(cmd_data, t)
+        spd_trail = []
+        for tt, ss in spd_data:
+            if t - 1.5 <= tt <= t + 0.05:
+                spd_trail.append((tt, ss))
+        classification = (
+            "USER_RELEASE" if (u_now is not None and abs(u_now) < 0.05)
+            else "OBSERVER_LOSS"
+        )
+        speeds = [s for _, s in spd_trail]
+        s_min = min(speeds, key=abs) if speeds else 0
+        s_at = nearest(spd_data, t) or 0
+        print(f"  t={t:6.2f}s  u={u_now:+.3f}  spd_at_loss={s_at:+6d}  "
+              f"spd_min_abs_in_prev_1.5s={s_min:+6d}  --> {classification}")
+    prev = mc
 print(f"\n=== RUN entries: {len(run_entries)} ===")
 for t, _ in run_entries[:10]:
     spd = nearest(spd_data, t)

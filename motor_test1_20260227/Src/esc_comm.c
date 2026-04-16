@@ -178,12 +178,16 @@ uint8_t ESC_COMM_HasNewCommand(void)
   */
 void ESC_COMM_SendTelemetry(int16_t speed_rpm, uint8_t state, uint8_t faults,
                             int16_t cmd_raw, uint16_t vbus_v,
-                            int16_t iq_ma, int16_t id_ma, uint8_t mcsdk_st)
+                            int16_t iq_ma, int16_t id_ma, uint8_t mcsdk_st,
+                            uint16_t innov_x1000,
+                            uint16_t kappa_x10000, uint16_t res_x1000)
 {
   uint8_t frame[ESC_TLM_FRAME_LEN];
 
   /* [0xBB][spd_lo][spd_hi][esc_st][faults][u_lo][u_hi][v_lo][v_hi]
-   *       [iq_lo][iq_hi][id_lo][id_hi][mcsdk_st][XOR of bytes 1..13] */
+   *       [iq_lo][iq_hi][id_lo][id_hi][mc_st][innov_lo][innov_hi]
+   *       [kappa_lo][kappa_hi][res_lo][res_hi]
+   *       [XOR of bytes 1..19] */
   frame[0]  = ESC_TLM_SOF;
   frame[1]  = (uint8_t)( speed_rpm & 0xFF);
   frame[2]  = (uint8_t)((speed_rpm >> 8) & 0xFF);
@@ -198,9 +202,17 @@ void ESC_COMM_SendTelemetry(int16_t speed_rpm, uint8_t state, uint8_t faults,
   frame[11] = (uint8_t)( id_ma & 0xFF);
   frame[12] = (uint8_t)((id_ma >> 8) & 0xFF);
   frame[13] = mcsdk_st;
-  frame[14] = frame[1]  ^ frame[2]  ^ frame[3]  ^ frame[4]  ^
+  frame[14] = (uint8_t)( innov_x1000 & 0xFF);
+  frame[15] = (uint8_t)((innov_x1000 >> 8) & 0xFF);
+  frame[16] = (uint8_t)( kappa_x10000 & 0xFF);
+  frame[17] = (uint8_t)((kappa_x10000 >> 8) & 0xFF);
+  frame[18] = (uint8_t)( res_x1000 & 0xFF);
+  frame[19] = (uint8_t)((res_x1000 >> 8) & 0xFF);
+  frame[20] = frame[1]  ^ frame[2]  ^ frame[3]  ^ frame[4]  ^
               frame[5]  ^ frame[6]  ^ frame[7]  ^ frame[8]  ^
-              frame[9]  ^ frame[10] ^ frame[11] ^ frame[12] ^ frame[13];
+              frame[9]  ^ frame[10] ^ frame[11] ^ frame[12] ^
+              frame[13] ^ frame[14] ^ frame[15] ^ frame[16] ^
+              frame[17] ^ frame[18] ^ frame[19];
 
   for (uint8_t i = 0U; i < ESC_TLM_FRAME_LEN; i++)
   {

@@ -46,7 +46,7 @@
 
 /* Frame sizes (bytes) */
 #define ESC_CMD_FRAME_LEN  5U
-#define ESC_TLM_FRAME_LEN  15U
+#define ESC_TLM_FRAME_LEN  21U
 
 /* Config frame (RPi5 → STM32, 5 bytes):
  *   [0xCC] [param_id] [val_lo] [val_hi] [XOR of bytes 1..3]
@@ -89,18 +89,17 @@ int16_t ESC_COMM_GetCommand(void);
 /* Returns 1 if a new command arrived since the last call; clears the flag. */
 uint8_t ESC_COMM_HasNewCommand(void);
 
-/* Build and transmit one telemetry frame (blocking, 15 bytes).
- *   speed_rpm : signed average motor speed in RPM
- *   state     : ESC_State_t cast to uint8_t
- *   faults    : lower byte of MC_GetCurrentFaultsMotor1()
- *   cmd_raw   : raw int16 command currently active (-32768..+32767)
- *   vbus_v    : DC bus voltage in whole Volts (from VBS_GetAvBusVoltage_V)
- *   iq_ma     : actual q-axis current in milliAmps (from MC_GetIqdMotor1_F)
- *   id_ma     : actual d-axis current in milliAmps (from MC_GetIqdMotor1_F)
- *   mcsdk_st  : MCI_State_t cast to uint8_t */
+/* Build and transmit one telemetry frame (blocking, 21 bytes).
+ * Frame: [0xBB][spd_lo][spd_hi][esc_st][faults][u_lo][u_hi][v_lo][v_hi]
+ *        [iq_lo][iq_hi][id_lo][id_hi][mc_st][innov_lo][innov_hi]
+ *        [kappa_lo][kappa_hi][res_lo][res_hi][XOR of bytes 1..19]
+ *   kappa_x10000: lock-confidence κ [×10000]  (uint16 saturating)
+ *   res_x1000   : lock residual |Vq-(Rs·Iq+Ψf·ω)| [V × 1000] (uint16 saturating) */
 void    ESC_COMM_SendTelemetry(int16_t speed_rpm, uint8_t state, uint8_t faults,
                                int16_t cmd_raw, uint16_t vbus_v,
-                               int16_t iq_ma, int16_t id_ma, uint8_t mcsdk_st);
+                               int16_t iq_ma, int16_t id_ma, uint8_t mcsdk_st,
+                               uint16_t innov_x1000,
+                               uint16_t kappa_x10000, uint16_t res_x1000);
 
 /* Runtime-configurable parameters (set by config frame; -1 if not configured).
  * mc_app_hooks.c falls back to compile-time defaults when these return <= 0. */
