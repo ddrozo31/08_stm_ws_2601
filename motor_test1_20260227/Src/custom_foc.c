@@ -205,6 +205,11 @@ static volatile uint8_t cfg_ekf_vf_prior_lock   = 1U;
 /* Max V/f↔EKF angle disagreement tolerated at swap [rad].
  * 0.524 rad ≈ 30°; matches the Phase A post-lock error cap. */
 #define CFOC_EKF_SWAP_MAX_ERR_RAD       0.524f
+/* Debounce: require N consecutive HF ticks of angle disagreement before
+ * raising ekf_swap_deferred (the MF-side CL gate signal). 25 ticks × 40µs
+ * = 1 ms. Prevents single-tick EKF angle wobble from resetting the CL
+ * hysteresis counter. HF angle selection (V/f vs EKF) remains per-tick. */
+#define CFOC_EKF_SWAP_BAD_HF_TICKS      25U
 /* Minimum dwell (in MF ticks = ms) above ω_thresh before allowing OPEN_LOOP→CL.
  * Phase C plan spec: 50 ms hysteresis. */
 #define CFOC_EKF_CL_HYSTERESIS_MS       50U
@@ -213,6 +218,7 @@ static volatile uint8_t cfg_ekf_vf_prior_lock   = 1U;
 static volatile float    ekf_R_rt         = 3.33e-3f;  /* last pushed R */
 static volatile float    ekf_bemf_mag_rt  = 0.0f;      /* |e| last HF tick */
 static volatile uint8_t  ekf_swap_deferred = 0U;       /* 1 = θ swap guard failed */
+static volatile uint16_t ekf_swap_bad_hf   = 0U;       /* HF ticks of sustained bad angle */
 static volatile uint32_t ekf_cl_hysteresis_ms = 0U;    /* |e| > thresh dwell */
 #endif /* USE_ADAPTIVE_R_EKF */
 
@@ -540,15 +546,24 @@ void CFOC_HighFrequencyTask(void)
            * OPEN_LOOP→CLOSED_LOOP transition is bumpless (CL integrates forward
            * from ol_theta_e). */
           ol_theta_e = a;
+          ekf_swap_bad_hf   = 0U;
           ekf_swap_deferred = 0U;
         }
         else
         {
-          ekf_swap_deferred = 1U;
+          /* HF angle falls back to V/f this tick (theta already integrated from
+           * ol_omega_e above). Only assert swap_deferred after sustained error —
+           * single-tick wobble must not reset the MF CL hysteresis. */
+          if (ekf_swap_bad_hf < 0xFFFFU) ekf_swap_bad_hf++;
+          if (ekf_swap_bad_hf >= CFOC_EKF_SWAP_BAD_HF_TICKS)
+          {
+            ekf_swap_deferred = 1U;
+          }
         }
       }
       else
       {
+        ekf_swap_bad_hf   = 0U;
         ekf_swap_deferred = 0U;
       }
     }
@@ -789,6 +804,7 @@ void CFOC_MediumFrequencyTask(void)
       }
       ekf_cl_hysteresis_ms = 0U;
       ekf_swap_deferred    = 0U;
+      ekf_swap_bad_hf      = 0U;
       ekf_R_rt             = cfg_ekf_r0;
       ekf_bemf_mag_rt      = 0.0f;
 #endif
