@@ -276,6 +276,18 @@
  * --------------------------------------------------------------------------- */
 #define USE_EKF_OBSERVER          1
 
+/* ── Adaptive-R EKF (Step 8 Phase B hooks) ───────────────────────────────── *
+ *  Compile-time master switch for the Step 8 adaptive-R + hybrid-angle path.
+ *  0 = build discrete OL→CROSSFADE→CL path only (today's behaviour)
+ *  1 = also build the adaptive-R path; runtime 0xCC param 0x14 selects mode
+ *
+ *  Default OFF until Phase D bench validation passes.  With it OFF, the
+ *  entire Step 8 code is elided at compile time — zero runtime impact and
+ *  zero flash/RAM cost — the firmware is byte-identical to pre-Step-8.
+ *  Reference: project_step8_prep_plan.md Phase B.
+ * --------------------------------------------------------------------------- */
+#define USE_ADAPTIVE_R_EKF        1
+
 /* PM flux linkage [Wb].  Derived from MOTOR_VOLTAGE_CONSTANT = 0.25 V_rms_LL/kRPM:
  *   Ψf = Ke_LL_rms × √2/√3 / (1000 RPM × 2π/60 × p) = 9.75×10⁻⁴ Wb  */
 #define EKF_PSI_F_WB              9.75e-4f

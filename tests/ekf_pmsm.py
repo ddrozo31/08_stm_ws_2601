@@ -155,7 +155,12 @@ class RevUpController:
     def step(self):
         """Returns (Vα, Vβ) and advances internal angle."""
         m = self.m
-        self.omega_ref = min(self.omega_ref + self.alpha * self.Ts, self.omega_max)
+        self.omega_ref += self.alpha * self.Ts
+        # Clamp respecting sign of target (supports reverse rev-up).
+        if self.omega_max >= 0:
+            self.omega_ref = min(self.omega_ref, self.omega_max)
+        else:
+            self.omega_ref = max(self.omega_ref, self.omega_max)
         self.theta_ref = (self.theta_ref + self.omega_ref * self.Ts) % (2 * np.pi)
 
         ω = self.omega_ref
@@ -356,6 +361,32 @@ class PMSM_EKF:
     @property
     def speed_rpm(self):
         return self.omega_e * 60.0 / (2 * np.pi * self.m.p)
+
+    # ── Step 8 adaptive-R hooks ────────────────────────────────────────────
+
+    def set_R_adaptive(self, omega_thresh_rad: float, R0: float = 3.33e-3):
+        """Schedule R(ω) = R0 × max(1, (ω_thresh/|ω_ekf|)²).
+
+        Call BEFORE update() on each tick. When |ω_ekf| is small the
+        measurement is effectively ignored (K≈0); as BEMF grows the
+        measurement takes over gradually — no discrete handoff.
+        """
+        omega_now = self.omega_e
+        scale = max(1.0, (omega_thresh_rad / max(omega_now, 1e-3)) ** 2)
+        R_now = R0 * scale
+        self.R = np.diag([R_now, R_now])
+
+    def seed_bemf(self, omega_e_init: float, theta_e_init: float = 0.0):
+        """Inject a small direction-biased BEMF prior at ALIGNMENT→SPINNING.
+
+        Resolves the left/right sign ambiguity that adaptive-R alone cannot
+        fix. Also bumps P[2,2]=P[3,3]=1e4 so the filter adapts fast.
+        """
+        psi = self.m.psi_f
+        self.x[2] = -psi * omega_e_init * np.sin(theta_e_init)
+        self.x[3] =  psi * omega_e_init * np.cos(theta_e_init)
+        self.P[2, 2] = 1e4
+        self.P[3, 3] = 1e4
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -567,6 +598,295 @@ def plot_results(results: list, out_path: str = "/tmp/ekf_comparison.png"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Step 8 — adaptive-R sweep
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Phase A of project_step8_prep_plan.md. Sweeps ω_thresh × Q_e × seed_bemf on
+# both AMORIL and HOSIM loads in both directions; reports which combinations
+# lock both loads ≤2 s with |err|≤15° and don't diverge on reverse.
+
+PHASE_A_EXIT_LOCK_S = 2.0     # must lock within this
+PHASE_A_EXIT_MAX_ERR_DEG = 30 # after lock, |err| must stay below this
+
+def run_adaptive_sim(load: DrivetrainLoad,
+                     direction: int,               # +1 forward, -1 reverse
+                     omega_thresh_rad: float,
+                     ekf_q_e: float,
+                     ekf_r0: float = 3.33e-3,
+                     ekf_q_i: float = 3.33e-3,
+                     vf_prior_lock: bool = False,
+                     I_phase_A: float = 8.0,
+                     target_rpm_abs: float = 1600.0,
+                     ramp_s: float = 3.0,
+                     duration_s: float = 4.0,
+                     noise_sigma: float = 0.0577,
+                     Ts: float = TS_FOC,
+                     seed: int = 42) -> dict:
+    """One startup with adaptive-R EKF.
+
+    direction     : +1 forward, -1 reverse
+    vf_prior_lock : Option A hybrid-angle mode. While |ω_V/f| < ω_thresh, force
+                    the EKF BEMF state to the signed V/f prior each tick AND
+                    report θ_V/f as the FOC angle. Above threshold, release the
+                    filter and hand FOC to EKF angle. This guarantees the
+                    filter stays in the correct direction basin (Phase A
+                    showed the one-shot seed is insufficient).
+    """
+    motor = MOTOR
+    total = int(duration_s / Ts)
+
+    sim  = PMSMSimulator(motor, load, Ts)
+    ekf  = PMSM_EKF(motor, Ts, q_i=ekf_q_i, q_e=ekf_q_e, r_i=ekf_r0)
+    # Flip Iq sign for reverse: V/f torque direction must match field-rotation
+    # direction, otherwise the rotor can't follow and the drive stalls.
+    ctrl = RevUpController(motor, Ts, direction * I_phase_A,
+                           direction * target_rpm_abs, ramp_s)
+    rng  = np.random.default_rng(seed)
+
+    log_stride = max(1, int(1e-3 / Ts))
+    n_log = total // log_stride
+    t_log    = np.empty(n_log)
+    rpm_true = np.empty(n_log)
+    rpm_ekf  = np.empty(n_log)
+    err_ekf  = np.empty(n_log)    # EKF angle vs truth (always)
+    err_foc  = np.empty(n_log)    # FOC-consumed angle vs truth (θ_V/f below thresh, EKF above)
+    R_log    = np.empty(n_log)
+    src_log  = np.empty(n_log, dtype=np.int8)   # 0=V/f, 1=EKF
+
+    li = 0
+    for k in range(total):
+        Va, Vb = ctrl.step()
+        theta_e, omega_m, ia, ib = sim.step(Va, Vb)
+
+        ia_n = ia + rng.normal(0.0, noise_sigma)
+        ib_n = ib + rng.normal(0.0, noise_sigma)
+
+        # Hybrid mode: continuously lock EKF BEMF state to V/f prior below threshold.
+        if vf_prior_lock and abs(ctrl.omega_ref) < omega_thresh_rad:
+            ekf.x[2] = -motor.psi_f * ctrl.omega_ref * np.sin(ctrl.theta_ref)
+            ekf.x[3] =  motor.psi_f * ctrl.omega_ref * np.cos(ctrl.theta_ref)
+
+        ekf.set_R_adaptive(omega_thresh_rad, ekf_r0)
+        ekf.update(Va, Vb, ia_n, ib_n)
+
+        # FOC-consumed angle: V/f θ below threshold, EKF above. The 4-state
+        # EKF's atan2(-ea, eb) returns the BEMF-vector angle, which equals the
+        # rotor angle for ω>0 but equals (rotor + π) for ω<0 (both ea and eb
+        # flip sign). Firmware knows the commanded direction, so we flip π
+        # when direction<0 to recover the rotor angle.
+        if abs(ctrl.omega_ref) < omega_thresh_rad:
+            foc_angle_deg = np.degrees(ctrl.theta_ref)
+            foc_src = 0
+        else:
+            foc_angle_deg = ekf.angle_deg - (180.0 if direction < 0 else 0.0)
+            foc_src = 1
+
+        if k % log_stride == 0 and li < n_log:
+            t_log[li]    = k * Ts
+            rpm_true[li] = _rpm_from_omega_m(omega_m)
+            rpm_ekf[li]  = ekf.speed_rpm
+            err_ekf[li]  = _angle_err_deg(ekf.angle_deg, theta_e)
+            err_foc[li]  = _angle_err_deg(foc_angle_deg, theta_e)
+            R_log[li]    = ekf.R[0, 0]
+            src_log[li]  = foc_src
+            li += 1
+
+    return dict(t=t_log[:li], rpm_true=rpm_true[:li], rpm_ekf=rpm_ekf[:li],
+                err_ekf=err_ekf[:li], err_foc=err_foc[:li],
+                R_log=R_log[:li], src_log=src_log[:li],
+                direction=direction)
+
+
+def lock_time_s(result: dict, window_ms: int = 100,
+                err_thresh: float = ERR_THRESHOLD_DEG) -> float:
+    """First t at which FOC has handed off to EKF and the FOC-consumed angle
+    error stays below err_thresh for window_ms consecutive samples.
+
+    Uses result['err_foc'] (V/f below thresh, EKF above) and result['src_log']
+    (requires src==1, i.e. EKF-driven).
+    """
+    err = result['err_foc']
+    src = result['src_log']
+    t   = result['t']
+    for i in range(len(err) - window_ms):
+        if not np.all(src[i:i+window_ms] == 1):
+            continue
+        if np.all(err[i:i+window_ms] < err_thresh):
+            return float(t[i])
+    return float('nan')
+
+
+def post_lock_max_err(result: dict, lock_t: float) -> float:
+    """Max FOC angle error from lock_t to end. NaN if never locked."""
+    if np.isnan(lock_t):
+        return float('nan')
+    mask = result['t'] >= lock_t
+    if not np.any(mask):
+        return float('nan')
+    return float(result['err_foc'][mask].max())
+
+
+def sweep_adaptive(omega_threshs=(150, 200, 250, 335),
+                   q_e_values=(1e-2, 3.33e-2, 1e-1),
+                   vf_prior_options=(False, True),
+                   duration_s: float = 4.0,
+                   verbose: bool = True) -> list:
+    """Run the full (ω_thresh, Q_e, vf_prior_lock) grid on AMORIL+HOSIM fwd+rev.
+
+    `vf_prior_lock=True` enables Option A hybrid-angle mode (continuous V/f
+    state-seeding below ω_thresh + V/f FOC angle below ω_thresh).
+
+    Returns list of row dicts suitable for tabular reporting.
+    """
+    rows = []
+    cases = [
+        ('AMORIL', AMORIL, 6.0, 2500.0),
+        ('HOSIM',  HOSIM,  8.0, 1600.0),
+    ]
+    total = len(omega_threshs) * len(q_e_values) * len(vf_prior_options)
+    counter = 0
+    for wth in omega_threshs:
+        for qe in q_e_values:
+            for vf in vf_prior_options:
+                counter += 1
+                if verbose:
+                    print(f"  [{counter:2d}/{total}] ω_thresh={wth:5.0f}  "
+                          f"Q_e={qe:.1e}  vf_lock={vf}")
+                row = dict(omega_thresh=wth, q_e=qe, vf_prior_lock=vf)
+                all_pass = True
+                for car_name, car_load, I_A, tgt_rpm in cases:
+                    for direction, dir_name in [(+1, 'fwd'), (-1, 'rev')]:
+                        r = run_adaptive_sim(car_load, direction,
+                                             omega_thresh_rad=wth,
+                                             ekf_q_e=qe,
+                                             vf_prior_lock=vf,
+                                             I_phase_A=I_A,
+                                             target_rpm_abs=tgt_rpm,
+                                             duration_s=duration_s)
+                        t_lock = lock_time_s(r)
+                        max_e  = post_lock_max_err(r, t_lock)
+                        passed = (not np.isnan(t_lock)
+                                  and t_lock <= PHASE_A_EXIT_LOCK_S
+                                  and max_e <= PHASE_A_EXIT_MAX_ERR_DEG)
+                        key = f"{car_name}_{dir_name}"
+                        row[f'{key}_lock_s'] = t_lock
+                        row[f'{key}_maxerr'] = max_e
+                        row[f'{key}_pass']   = passed
+                        all_pass = all_pass and passed
+                row['PASS'] = all_pass
+                rows.append(row)
+    return rows
+
+
+def print_adaptive_sweep(rows: list):
+    """Pretty-print the sweep matrix."""
+    print()
+    print("="*118)
+    print("Step 8 Phase A — adaptive-R sweep  (pass = lock ≤ "
+          f"{PHASE_A_EXIT_LOCK_S:.1f}s and post-lock |err| ≤ "
+          f"{PHASE_A_EXIT_MAX_ERR_DEG}°)")
+    print("="*118)
+    hdr = (f"{'ω_th':>5}  {'Q_e':>8}  {'vf_lk':>5}  "
+           f"{'AM_fwd_t':>8}  {'AM_fwd_e':>8}  "
+           f"{'AM_rev_t':>8}  {'AM_rev_e':>8}  "
+           f"{'HO_fwd_t':>8}  {'HO_fwd_e':>8}  "
+           f"{'HO_rev_t':>8}  {'HO_rev_e':>8}  {'VERDICT':>7}")
+    print(hdr)
+    print("-"*118)
+    def fmt(v):
+        if isinstance(v, float) and np.isnan(v): return "   nan"
+        return f"{v:6.2f}"
+    for r in rows:
+        v = "PASS" if r['PASS'] else "fail"
+        print(f"{r['omega_thresh']:5.0f}  {r['q_e']:8.1e}  "
+              f"{str(r['vf_prior_lock']):>5}  "
+              f"{fmt(r['AMORIL_fwd_lock_s'])}  {fmt(r['AMORIL_fwd_maxerr'])}  "
+              f"{fmt(r['AMORIL_rev_lock_s'])}  {fmt(r['AMORIL_rev_maxerr'])}  "
+              f"{fmt(r['HOSIM_fwd_lock_s'])}  {fmt(r['HOSIM_fwd_maxerr'])}  "
+              f"{fmt(r['HOSIM_rev_lock_s'])}  {fmt(r['HOSIM_rev_maxerr'])}  "
+              f"{v:>7}")
+    passing = [r for r in rows if r['PASS']]
+    print()
+    if passing:
+        print(f"{len(passing)}/{len(rows)} combinations pass.  Recommended "
+              "(most conservative ω_thresh among passers):")
+        # Prefer higher ω_thresh (= more conservative), then lower Q_e, vf_lock on first.
+        passing_sorted = sorted(
+            passing,
+            key=lambda r: (-r['omega_thresh'], r['q_e'],
+                           not r['vf_prior_lock']))
+        best = passing_sorted[0]
+        print(f"  ω_thresh = {best['omega_thresh']:.0f} rad/s   "
+              f"Q_e = {best['q_e']:.1e}   "
+              f"vf_prior_lock = {best['vf_prior_lock']}")
+    else:
+        print("NO combination passes.  Need to revisit the design "
+              "(widen grid, add stronger prior, or lower the exit bar).")
+    print()
+
+
+def plot_adaptive_best(rows: list, out_path: str = "/tmp/ekf_adaptive_best.png"):
+    """Plot the recommended (best) combination on both cars, both directions."""
+    passing = [r for r in rows if r['PASS']]
+    if not passing:
+        print("(no passing combination to plot)")
+        return
+    passing_sorted = sorted(
+        passing,
+        key=lambda r: (-r['omega_thresh'], r['q_e'], not r['vf_prior_lock']))
+    best = passing_sorted[0]
+    wth, qe, vf = best['omega_thresh'], best['q_e'], best['vf_prior_lock']
+
+    cases = [
+        ('AMORIL fwd', AMORIL, +1, 6.0, 2500.0),
+        ('AMORIL rev', AMORIL, -1, 6.0, 2500.0),
+        ('HOSIM fwd',  HOSIM,  +1, 8.0, 1600.0),
+        ('HOSIM rev',  HOSIM,  -1, 8.0, 1600.0),
+    ]
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not available — skipping plot")
+        return
+    fig, axes = plt.subplots(3, 4, figsize=(16, 9), sharex=True)
+    for col, (label, load, d, I_A, tgt) in enumerate(cases):
+        r = run_adaptive_sim(load, d, wth, qe, vf_prior_lock=vf,
+                             I_phase_A=I_A, target_rpm_abs=tgt,
+                             duration_s=4.0)
+        axes[0, col].plot(r['t'], r['rpm_true'], 'k-', lw=1.5, label='true')
+        axes[0, col].plot(r['t'], r['rpm_ekf'],  'b-', lw=1.2, label='EKF')
+        axes[0, col].set_title(label)
+        axes[0, col].set_ylabel('RPM')
+        axes[0, col].grid(True, alpha=0.3)
+        axes[0, col].legend(fontsize=8)
+
+        axes[1, col].semilogy(r['t'], r['err_foc']+0.1, 'b-', label='err_foc')
+        axes[1, col].semilogy(r['t'], r['err_ekf']+0.1, 'r:', lw=0.8, label='err_ekf')
+        axes[1, col].axhline(ERR_THRESHOLD_DEG, color='#888', ls=':')
+        axes[1, col].set_ylabel('|angle err| (deg)')
+        axes[1, col].set_ylim(0.05, 200)
+        axes[1, col].grid(True, alpha=0.3, which='both')
+        axes[1, col].legend(fontsize=7)
+
+        axes[2, col].semilogy(r['t'], r['R_log'], 'g-', label='R (A²)')
+        ax2b = axes[2, col].twinx()
+        ax2b.plot(r['t'], r['src_log'], 'm-', lw=0.8, label='src (0=V/f,1=EKF)')
+        ax2b.set_ylim(-0.2, 1.2)
+        axes[2, col].set_ylabel('R (A²)')
+        axes[2, col].set_xlabel('t (s)')
+        axes[2, col].grid(True, alpha=0.3, which='both')
+
+    plt.suptitle(f"Adaptive-R EKF (hybrid angle) — best combination  "
+                 f"ω_thresh={wth:.0f} rad/s, Q_e={qe:.1e}, vf_lock={vf}",
+                 fontsize=11)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140, bbox_inches='tight')
+    print(f"Plot saved → {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -574,11 +894,25 @@ def main():
     parser = argparse.ArgumentParser(description="PMSM EKF prototype")
     parser.add_argument('--sweep-q',  action='store_true',
                         help='Sweep q_e values to show Q sensitivity')
+    parser.add_argument('--sweep-adaptive', action='store_true',
+                        help='Step 8 Phase A: adaptive-R sweep on AMORIL+HOSIM fwd+rev')
     parser.add_argument('--no-plot',  action='store_true',
                         help='Skip plot output')
     parser.add_argument('--duration', type=float, default=5.0,
                         help='Simulation duration in seconds (default 5.0)')
     args = parser.parse_args()
+
+    if args.sweep_adaptive:
+        print("Step 8 Phase A — adaptive-R sweep")
+        print(f"  grid: ω_thresh ∈ {{150,200,250,335}} rad/s  "
+              f"×  Q_e ∈ {{1e-2, 3.33e-2, 1e-1}}  ×  seed_bemf ∈ {{F,T}}")
+        print(f"  cars: AMORIL (6 A, 2500 RPM) + HOSIM (8 A, 1600 RPM), "
+              f"both directions, duration={args.duration:.1f}s")
+        rows = sweep_adaptive(duration_s=args.duration)
+        print_adaptive_sweep(rows)
+        if not args.no_plot:
+            plot_adaptive_best(rows)
+        return
 
     print("Running HOSIM simulation  (heavy drivetrain, 8A, 1600 RPM)...")
     r_hosim  = run_simulation(HOSIM,  label='HOSIM (heavy)',

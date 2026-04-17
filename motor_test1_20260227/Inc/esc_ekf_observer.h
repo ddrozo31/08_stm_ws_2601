@@ -107,6 +107,18 @@ void EKF_Update(EKF_Handle_t *h,
                 float ia_m, float ib_m);
 
 /**
+ * @brief  EKF_SetR — runtime override of the measurement noise scalar.
+ *
+ * Overwrites h->_R. Used by the Step 8 adaptive-R path, which recomputes
+ * R(|e|) = R0 × max(1, (ψf·ω_thresh / |e|)²) each HF tick and pushes it
+ * in before EKF_Update. Pure setter — no clamping, no side effects.
+ *
+ * @param h  EKF handle.
+ * @param R  New measurement noise variance [A²]. Must be > 0.
+ */
+void EKF_SetR(EKF_Handle_t *h, float R);
+
+/**
  * @brief  EKF_GetAngle — estimated rotor electrical angle.
  * @return θ_e in radians, range [−π, π].
  */

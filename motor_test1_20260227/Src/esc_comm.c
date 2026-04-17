@@ -55,6 +55,15 @@ static volatile float esc_cfg_spd_kp      = -1.0f;
 static volatile float esc_cfg_spd_ki      = -1.0f;
 static volatile float esc_cfg_spd_lpf     = -1.0f;
 
+/* Step 8 adaptive-R EKF runtime config.
+ * observer_mode and vf_prior_lock use 0xFF as the "host never sent" sentinel
+ * (uint8_t can't hold -1). The three float params use -1.0f like the rest. */
+static volatile uint8_t esc_cfg_observer_mode    = 0xFFU;
+static volatile float   esc_cfg_ekf_omega_thresh = -1.0f;
+static volatile float   esc_cfg_ekf_r0           = -1.0f;
+static volatile float   esc_cfg_ekf_qe           = -1.0f;
+static volatile uint8_t esc_cfg_ekf_vf_prior_lock = 0xFFU;
+
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -139,6 +148,21 @@ float ESC_COMM_GetSpdKi(void) { return esc_cfg_spd_ki; }
 
 /** @brief Speed PI LPF alpha or -1 if not configured. */
 float ESC_COMM_GetSpdLpfAlpha(void) { return esc_cfg_spd_lpf; }
+
+/** @brief Observer mode (0=discrete, 1=adaptive-R), or 0xFF if not configured. */
+uint8_t ESC_COMM_GetObserverMode(void) { return esc_cfg_observer_mode; }
+
+/** @brief EKF adaptive-R ω threshold (elec rad/s), or -1 if not configured. */
+float ESC_COMM_GetEkfOmegaThreshRad(void) { return esc_cfg_ekf_omega_thresh; }
+
+/** @brief EKF R0 (A², decoded from ×10000), or -1 if not configured. */
+float ESC_COMM_GetEkfR0(void) { return esc_cfg_ekf_r0; }
+
+/** @brief EKF Q_e (decoded from ×10000), or -1 if not configured. */
+float ESC_COMM_GetEkfQe(void) { return esc_cfg_ekf_qe; }
+
+/** @brief V/f prior force-lock enable (0/1), or 0xFF if not configured. */
+uint8_t ESC_COMM_GetEkfVfPriorLock(void) { return esc_cfg_ekf_vf_prior_lock; }
 
 /* -------------------------------------------------------------------------- */
 /* Command accessors                                                           */
@@ -392,6 +416,48 @@ static void ESC_COMM_ProcessByte(uint8_t byte)
             if ((val >= 2) && (val <= 20))
             {
               esc_cfg_spd_lpf = (float)val * 0.0001f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_OBS_MODE)
+          {
+            /* val = 0 (discrete) or 1 (adaptive-R). Ignore other values. */
+            if ((val == 0) || (val == 1))
+            {
+              esc_cfg_observer_mode = (uint8_t)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_EKF_WTHRESH)
+          {
+            /* val = int16_t elec rad/s; valid range 50–400 (Phase A grid 150–335) */
+            if ((val >= 50) && (val <= 400))
+            {
+              esc_cfg_ekf_omega_thresh = (float)val;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_EKF_R0)
+          {
+            /* val = int16_t × 0.0001 A²; valid range 1–10000 (1e-4–1.0 A²).
+             * Default candidate 33 → 3.3e-3 A² (matches EKF_R_CURRENT). */
+            if ((val >= 1) && (val <= 10000))
+            {
+              esc_cfg_ekf_r0 = (float)val * 1.0e-4f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_EKF_QE)
+          {
+            /* val = int16_t × 0.0001; valid range 1–10000 (1e-4–1.0).
+             * Phase A grid: 100 (1e-2), 333 (3.33e-2), 1000 (1e-1). */
+            if ((val >= 1) && (val <= 10000))
+            {
+              esc_cfg_ekf_qe = (float)val * 1.0e-4f;
+            }
+          }
+          else if (param_id == ESC_CFG_PARAM_EKF_VFPL)
+          {
+            /* val = 0 (off) or 1 (force-seed EKF BEMF from V/f below ω_thresh). */
+            if ((val == 0) || (val == 1))
+            {
+              esc_cfg_ekf_vf_prior_lock = (uint8_t)val;
             }
           }
           /* Unknown param_id: silently ignore. */

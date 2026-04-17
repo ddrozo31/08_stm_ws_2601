@@ -80,6 +80,15 @@
 #define ESC_CFG_PARAM_SPD_KI   0x0EU  /*!< Speed PI Ki [× 0.0001 A/RPM]      */
 #define ESC_CFG_PARAM_SPD_LPF  0x0FU  /*!< Speed PI LPF alpha [× 0.0001]     */
 
+/* Step 8 adaptive-R EKF params (Phase B hooks, consumed in Phase C).
+ * All five are no-ops while USE_ADAPTIVE_R_EKF=0 OR observer_mode=0.
+ * Ranges chosen to cover the (ω_thresh, Q_e) grid that Phase A swept. */
+#define ESC_CFG_PARAM_OBS_MODE   0x14U /*!< 0 = discrete (legacy), 1 = adaptive-R */
+#define ESC_CFG_PARAM_EKF_WTHRESH 0x15U /*!< ω_thresh [elec rad/s, int16, 50–400]  */
+#define ESC_CFG_PARAM_EKF_R0     0x16U /*!< R0 × 10000 [A², int16, 1–10000]        */
+#define ESC_CFG_PARAM_EKF_QE     0x17U /*!< Q_e × 10000 [int16, 1–10000]           */
+#define ESC_CFG_PARAM_EKF_VFPL   0x18U /*!< V/f prior force-lock below ω_thresh (0/1) */
+
 /* Initialise the layer and enable the USART2 RXNE interrupt. */
 void    ESC_COMM_Init(void);
 
@@ -118,6 +127,14 @@ float   ESC_COMM_GetOlTargetRPM(void); /*!< OL target speed (RPM) or -1      */
 float   ESC_COMM_GetSpdKp(void);       /*!< Speed PI Kp (A/RPM) or -1        */
 float   ESC_COMM_GetSpdKi(void);       /*!< Speed PI Ki (A/RPM) or -1        */
 float   ESC_COMM_GetSpdLpfAlpha(void); /*!< Speed PI LPF alpha or -1         */
+
+/* Step 8 adaptive-R EKF getters. Return a sentinel (-1 for floats, 0xFF for
+ * observer_mode, 0xFF for vf_prior_lock) when the host never sent the param. */
+uint8_t ESC_COMM_GetObserverMode(void);      /*!< 0=discrete, 1=adaptive, 0xFF=unset */
+float   ESC_COMM_GetEkfOmegaThreshRad(void); /*!< elec rad/s, or -1 if unset   */
+float   ESC_COMM_GetEkfR0(void);             /*!< A² (decoded), or -1 if unset */
+float   ESC_COMM_GetEkfQe(void);             /*!< decoded, or -1 if unset      */
+uint8_t ESC_COMM_GetEkfVfPriorLock(void);    /*!< 0/1, 0xFF=unset              */
 
 /* Call from USART2_IRQHandler USER CODE BEGIN 0 -- processes one RXNE byte. */
 void    ESC_COMM_UART_RxISR(void);

@@ -263,6 +263,31 @@ void CFOC_SetCrossfadeParams(float xf_dur_ms, float xf_dwell_ms, float ol_rpm);
  *  @param lpf_alpha Speed PI feedback LPF alpha (EKF speed filter). */
 void CFOC_SetSpeedPIParams(float kp, float ki, float lpf_alpha);
 
+/** Set Step 8 adaptive-R EKF params at runtime.
+ *  Pass 0xFF for mode / vf_lock to keep the current value; pass <= 0 for
+ *  floats to keep them. Values take effect on the next CFOC_Start() cycle
+ *  (EKF_Init uses them when transitioning ALIGNMENT → OPEN_LOOP).
+ *
+ *  @param mode          0 = discrete (legacy), 1 = adaptive-R, 0xFF = keep
+ *  @param omega_thresh  EKF adaptive-R knee [elec rad/s]
+ *  @param R0            Healthy-speed R [A²]
+ *  @param Qe            BEMF process noise variance
+ *  @param vf_lock       0 = off, 1 = force-seed EKF BEMF from V/f, 0xFF = keep
+ *  No-op build when USE_ADAPTIVE_R_EKF=0 (function body elided). */
+void CFOC_SetAdaptiveREkfParams(uint8_t mode, float omega_thresh,
+                                float R0, float Qe, uint8_t vf_lock);
+
+/** Step 8 telemetry accessors. Return 0 in non-adaptive builds. */
+uint8_t CFOC_GetObserverMode(void);  /*!< current observer mode (0=discrete, 1=adaptive) */
+float   CFOC_GetEkfR(void);          /*!< latest pushed R value [A²]   */
+float   CFOC_GetEkfBemfMag(void);    /*!< latest |e| = √(eα²+eβ²) [V] */
+
+/** Step 8 CL-gate diagnostic: 1 if θ-swap guard blocked, else 0. */
+uint8_t CFOC_GetSwapDeferred(void);
+
+/** Step 8 CL-gate diagnostic: consecutive ms that |e|>threshold held. */
+uint32_t CFOC_GetClHysteresisMs(void);
+
 /** Get measured d-q currents from most recent HF cycle.
  *  @param[out] iq  q-axis current [A].
  *  @param[out] id  d-axis current [A]. */

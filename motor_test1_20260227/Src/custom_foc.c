@@ -12,6 +12,7 @@
  */
 
 #include "custom_foc.h"
+#include "drive_parameters.h"   /* USE_ADAPTIVE_R_EKF */
 #include "esc_ekf_observer.h"
 #include "stm32g4xx_ll_tim.h"
 #include "stm32g4xx_ll_adc.h"
@@ -185,6 +186,35 @@ static volatile float    cfg_ol_target_rpm  = CFOC_OL_TARGET_RPM;
 
 /* ── Runtime speed PI LPF alpha (overridable via ESC 0xCC config) ───── */
 static volatile float cfg_spd_pi_lpf_alpha = CFOC_EKF_SPD_PI_LPF_ALPHA;
+
+#if USE_ADAPTIVE_R_EKF
+/* ── Step 8 adaptive-R EKF runtime config (0xCC params 0x14–0x18) ────── *
+ *  All of these are inert until cfg_observer_mode becomes 1. Defaults are
+ *  the Phase A recommended start (project_step8_phaseA_decision.md):
+ *    ω_thresh=200 rad/s elec, Q_e=1e-2, R0=3.33e-3 A², vf_prior_lock ON.
+ *  Mode defaults to 0 (discrete/legacy) so a fresh boot without 0xCC
+ *  traffic behaves exactly as the non-adaptive build. */
+static volatile uint8_t cfg_observer_mode       = 0U;
+static volatile float   cfg_ekf_omega_thresh    = 200.0f;    /* elec rad/s */
+static volatile float   cfg_ekf_r0              = 3.33e-3f;  /* A² */
+static volatile float   cfg_ekf_qe              = 1.0e-2f;
+static volatile uint8_t cfg_ekf_vf_prior_lock   = 1U;
+
+/* Hysteresis band around ω_thresh for the θ_V/f → θ_EKF swap. */
+#define CFOC_EKF_SWAP_HYSTERESIS_RAD_S  20.0f
+/* Max V/f↔EKF angle disagreement tolerated at swap [rad].
+ * 0.524 rad ≈ 30°; matches the Phase A post-lock error cap. */
+#define CFOC_EKF_SWAP_MAX_ERR_RAD       0.524f
+/* Minimum dwell (in MF ticks = ms) above ω_thresh before allowing OPEN_LOOP→CL.
+ * Phase C plan spec: 50 ms hysteresis. */
+#define CFOC_EKF_CL_HYSTERESIS_MS       50U
+
+/* Diagnostic state (read by telemetry). */
+static volatile float    ekf_R_rt         = 3.33e-3f;  /* last pushed R */
+static volatile float    ekf_bemf_mag_rt  = 0.0f;      /* |e| last HF tick */
+static volatile uint8_t  ekf_swap_deferred = 0U;       /* 1 = θ swap guard failed */
+static volatile uint32_t ekf_cl_hysteresis_ms = 0U;    /* |e| > thresh dwell */
+#endif /* USE_ADAPTIVE_R_EKF */
 
 /* ── Inline helpers ─────────────────────────────────────────────────────── */
 
@@ -483,6 +513,47 @@ void CFOC_HighFrequencyTask(void)
     else if (theta < -PI_F) theta += TWO_PI;
     ol_theta_e = theta;
 
+#if USE_ADAPTIVE_R_EKF
+    /* Step 8 Option A hybrid-angle consumer: below ω_thresh keep V/f θ,
+     * above ω_thresh+hyst swap to EKF θ (with π-flip for reverse — the
+     * 4-state EKF's BEMF-vector angle is off by π for ω<0; Phase A
+     * prototype bug #2, see project_step8_phaseA_decision.md).
+     * Swap-continuity guard: if |θ_V/f − θ_EKF| > swap_max_err, hold on
+     * V/f and raise ekf_swap_deferred. */
+    if (cfg_observer_mode == 1U)
+    {
+      float om_ekf_abs = ekf_omega_e >= 0.0f ? ekf_omega_e : -ekf_omega_e;
+      if (om_ekf_abs > cfg_ekf_omega_thresh + CFOC_EKF_SWAP_HYSTERESIS_RAD_S)
+      {
+        float a = ekf_theta_e;
+        if (ol_direction < 0) a -= PI_F;
+        if (a >  PI_F) a -= TWO_PI;
+        else if (a < -PI_F) a += TWO_PI;
+        float derr = a - theta;
+        if (derr >  PI_F) derr -= TWO_PI;
+        else if (derr < -PI_F) derr += TWO_PI;
+        float derr_abs = derr >= 0.0f ? derr : -derr;
+        if (derr_abs <= CFOC_EKF_SWAP_MAX_ERR_RAD)
+        {
+          theta = a;
+          /* Keep ol_theta_e in sync with the swapped-in angle so the eventual
+           * OPEN_LOOP→CLOSED_LOOP transition is bumpless (CL integrates forward
+           * from ol_theta_e). */
+          ol_theta_e = a;
+          ekf_swap_deferred = 0U;
+        }
+        else
+        {
+          ekf_swap_deferred = 1U;
+        }
+      }
+      else
+      {
+        ekf_swap_deferred = 0U;
+      }
+    }
+#endif
+
     Iq_ref = ol_Iq_ref;
     Id_ref = ol_Id_ref;
   }
@@ -599,6 +670,42 @@ void CFOC_HighFrequencyTask(void)
     float Va_comp = Valpha + Vdt * (2.0f / 3.0f) * (sa - 0.5f * sb - 0.5f * sc);
     float Vb_comp = Vbeta  + Vdt * INV_SQRT3     * (sb - sc);
 
+#if USE_ADAPTIVE_R_EKF
+    /* Step 8 adaptive-R: V/f BEMF seeding + R(|e|) schedule, run BEFORE
+     * EKF_Update so this tick's correction uses the scheduled R and the
+     * BEMF state stays in the correct basin while ω is below threshold.
+     * Only active in OPEN_LOOP — in CLOSED_LOOP the EKF is locked and
+     * adaptive-R degenerates to a constant R = cfg_ekf_r0. */
+    if (cfg_observer_mode == 1U)
+    {
+      if (cfoc_state == CFOC_OPEN_LOOP && cfg_ekf_vf_prior_lock &&
+          ((ol_omega_e >= 0.0f ? ol_omega_e : -ol_omega_e) < cfg_ekf_omega_thresh))
+      {
+        /* Force-seed EKF BEMF from signed V/f prior. Phase A showed the
+         * one-shot seed is washed out by adaptive-R in ms — continuous
+         * seeding is the insurance policy (real hardware has ~10× sim
+         * noise; basin-jumping is possible without this). */
+        ekf.x[2] = -CFOC_PSI_F * ol_omega_e * sinf(ol_theta_e);
+        ekf.x[3] =  CFOC_PSI_F * ol_omega_e * cosf(ol_theta_e);
+      }
+      /* R(|e|) = R0 × max(1, (ψf·ω_thresh / |e|)²). Clamp |e| at a tiny
+       * floor to avoid divide-by-zero at startup (before any BEMF is built).
+       * Ratio > 1 → scale squared; else scale=1 (healthy-speed floor). */
+      {
+        float ea = ekf.x[2], eb = ekf.x[3];
+        float emag = sqrtf(ea * ea + eb * eb);
+        if (emag < 1.0e-6f) emag = 1.0e-6f;
+        ekf_bemf_mag_rt = emag;
+        float thresh_bemf = CFOC_PSI_F * cfg_ekf_omega_thresh;
+        float ratio = thresh_bemf / emag;
+        float scale = (ratio > 1.0f) ? (ratio * ratio) : 1.0f;
+        float R_now = cfg_ekf_r0 * scale;
+        ekf_R_rt = R_now;
+        EKF_SetR(&ekf, R_now);
+      }
+    }
+#endif
+
     EKF_Update(&ekf, Va_comp, Vb_comp, Ialpha, Ibeta);
     ekf_theta_e = EKF_GetAngle(&ekf);
     float rpm_mag = EKF_GetSpeedRPM(&ekf);  /* always positive */
@@ -670,6 +777,21 @@ void CFOC_MediumFrequencyTask(void)
        * At 1 kHz (Ts=1ms), a1 = -9999 → massively unstable. */
       EKF_Init(&ekf, CFOC_RS, CFOC_LS, CFOC_PSI_F, CFOC_POLE_PAIRS,
                CFOC_TS, CFOC_EKF_Q_I, CFOC_EKF_Q_E, CFOC_EKF_R_I);
+#if USE_ADAPTIVE_R_EKF
+      /* Phase A tuning: override Q_e and R with runtime-configurable values
+       * when the adaptive path is active. Q_i stays at the compile-time
+       * default — Phase A swept only Q_e. */
+      if (cfg_observer_mode == 1U)
+      {
+        ekf._Q[2] = cfg_ekf_qe;
+        ekf._Q[3] = cfg_ekf_qe;
+        ekf._R    = cfg_ekf_r0;
+      }
+      ekf_cl_hysteresis_ms = 0U;
+      ekf_swap_deferred    = 0U;
+      ekf_R_rt             = cfg_ekf_r0;
+      ekf_bemf_mag_rt      = 0.0f;
+#endif
       xf_dwell_ms = 0U;
       xf_blend_ms = 0U;
 
@@ -704,6 +826,47 @@ void CFOC_MediumFrequencyTask(void)
 
     ol_Iq_ref = cfg_ol_iq_target * iq_frac * (float)ol_direction;
     ol_Id_ref = CFOC_OL_ID_REF;
+
+#if USE_ADAPTIVE_R_EKF
+    /* Step 8 Option A: OPEN_LOOP → CLOSED_LOOP directly (no CROSSFADE)
+     * gated by EKF BEMF-magnitude dwell. CROSSFADE is never entered when
+     * observer_mode==1. */
+    if (cfg_observer_mode == 1U)
+    {
+      float thresh_bemf = CFOC_PSI_F * cfg_ekf_omega_thresh;
+      /* ekf_bemf_mag_rt updated each HF tick in the adaptive path. */
+      if (ekf_bemf_mag_rt > thresh_bemf && !ekf_swap_deferred)
+      {
+        if (++ekf_cl_hysteresis_ms >= CFOC_EKF_CL_HYSTERESIS_MS)
+        {
+          /* Bumpless OL→CL: angle is already EKF-sourced (HF swap),
+           * PI integral seeded with last Iq ref, speed cmd = current
+           * EKF speed (the ESC layer overrides it on the next MF tick). */
+          if (ol_direction >= 0) {
+            pi_spd.out_min = 0.0f;
+            pi_spd.out_max = cfoc_iq_limit;
+          } else {
+            pi_spd.out_min = -cfoc_iq_limit;
+            pi_spd.out_max = 0.0f;
+          }
+          pi_spd.integral = ol_Iq_ref;
+          spd_cmd_rpm     = ekf_rpm;
+          ekf_cl_hysteresis_ms = 0U;
+          cfoc_state = CFOC_CLOSED_LOOP;
+        }
+      }
+      else
+      {
+        ekf_cl_hysteresis_ms = 0U;
+      }
+      /* Safety: stop if OL runs too long without EKF convergence */
+      if (ol_ramp_ms >= CFOC_OL_MAX_MS)
+      {
+        cfoc_state = CFOC_FAULT;
+      }
+      goto log_sample;
+    }
+#endif
 
     /* Crossfade trigger: wait for ramp to complete + dwell.
      * Speed crossfade doesn't need angle agreement — only speed source changes. */
@@ -1002,6 +1165,65 @@ void CFOC_SetSpeedPIParams(float kp, float ki, float lpf_alpha)
   if (kp > 0.0f)        pi_spd.Kp = kp;
   if (ki > 0.0f)        pi_spd.Ki = ki;
   if (lpf_alpha > 0.0f) cfg_spd_pi_lpf_alpha = lpf_alpha;
+}
+
+void CFOC_SetAdaptiveREkfParams(uint8_t mode, float omega_thresh,
+                                float R0, float Qe, uint8_t vf_lock)
+{
+#if USE_ADAPTIVE_R_EKF
+  if (mode != 0xFFU)          cfg_observer_mode     = mode;
+  if (omega_thresh > 0.0f)    cfg_ekf_omega_thresh  = omega_thresh;
+  if (R0 > 0.0f)              cfg_ekf_r0            = R0;
+  if (Qe > 0.0f)              cfg_ekf_qe            = Qe;
+  if (vf_lock != 0xFFU)       cfg_ekf_vf_prior_lock = vf_lock;
+#else
+  (void)mode; (void)omega_thresh; (void)R0; (void)Qe; (void)vf_lock;
+#endif
+}
+
+uint8_t CFOC_GetObserverMode(void)
+{
+#if USE_ADAPTIVE_R_EKF
+  return cfg_observer_mode;
+#else
+  return 0U;
+#endif
+}
+
+float CFOC_GetEkfR(void)
+{
+#if USE_ADAPTIVE_R_EKF
+  return ekf_R_rt;
+#else
+  return 0.0f;
+#endif
+}
+
+float CFOC_GetEkfBemfMag(void)
+{
+#if USE_ADAPTIVE_R_EKF
+  return ekf_bemf_mag_rt;
+#else
+  return 0.0f;
+#endif
+}
+
+uint8_t CFOC_GetSwapDeferred(void)
+{
+#if USE_ADAPTIVE_R_EKF
+  return ekf_swap_deferred;
+#else
+  return 0U;
+#endif
+}
+
+uint32_t CFOC_GetClHysteresisMs(void)
+{
+#if USE_ADAPTIVE_R_EKF
+  return ekf_cl_hysteresis_ms;
+#else
+  return 0U;
+#endif
 }
 
 void CFOC_GetIqd(float *iq, float *id)

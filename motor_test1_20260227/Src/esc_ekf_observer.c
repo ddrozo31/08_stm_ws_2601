@@ -282,6 +282,13 @@ void EKF_Update(EKF_Handle_t *h,
     if (h->P[IP33] < h->_Q[3]) h->P[IP33] = h->_Q[3];
 }
 
+/* ── Runtime setters ──────────────────────────────────────────────────────── */
+
+void EKF_SetR(EKF_Handle_t *h, float R)
+{
+    h->_R = R;
+}
+
 /* ── Output functions ─────────────────────────────────────────────────────── */
 
 float EKF_GetAngle(const EKF_Handle_t *h)
